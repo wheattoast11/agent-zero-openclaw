@@ -1,0 +1,61 @@
+{
+  "name": "@terminals-tech/agent-zero-openclaw",
+  "version": "0.2.0",
+  "description": "Agent Zero skill for OpenClaw - Production-grade orchestration with thermodynamic routing, Kuramoto coherence, and isomorphic security",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "agent-zero": "./bin/agent-zero.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:skill": "tsc && cp SKILL.md skill.json dist/",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "rail": "node dist/rail/index.js",
+    "test": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "openclaw",
+    "moltbot",
+    "agent-zero",
+    "terminals-tech",
+    "thermodynamic-routing",
+    "kuramoto",
+    "multi-agent",
+    "ai-orchestration"
+  ],
+  "author": "terminals.tech",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.35.0",
+    "@electric-sql/pglite": "^0.2.0",
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.0",
+    "agent-twitter-client": "^0.0.18",
+    "chalk": "^5.3.0",
+    "eventemitter3": "^5.0.1",
+    "grammy": "^1.30.0",
+    "qrcode-terminal": "^0.12.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/terminals-tech/agent-zero-openclaw"
+  },
+  "homepage": "https://terminals.tech"
+}

@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.*
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data & persistence
+data/
+*.db
+*.sqlite
+
+# Vault (never commit encrypted secrets)
+vault.enc
+.vault.lock
+
+# Coverage & testing
+coverage/
+.nyc_output/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Archives
+*.zip
+*.tar.gz
+
+# WhatsApp auth state
+wa-auth/

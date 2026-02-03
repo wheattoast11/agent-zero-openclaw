@@ -1,0 +1,46 @@
+{
+  "name": "agent-zero",
+  "version": "0.1.0",
+  "description": "Multi-agent orchestration with thermodynamic routing, Kuramoto coherence, and capability-based security",
+  "author": "terminals.tech",
+  "license": "MIT",
+  "homepage": "https://terminals.tech",
+  "repository": "https://github.com/terminals-tech/agent-zero-openclaw",
+  "entry": "dist/openclaw/skill.js",
+  "triggers": [
+    "@agent-zero",
+    "/zero",
+    "/resonate",
+    "/coherence"
+  ],
+  "capabilities": {
+    "filesystem": ["~/.agent-zero/**"],
+    "network": [
+      "space.terminals.tech",
+      "rail.terminals.tech",
+      "terminals.tech",
+      "api.openrouter.ai"
+    ],
+    "spawn": 8,
+    "memory": 536870912,
+    "execute": true
+  },
+  "platforms": [
+    "whatsapp",
+    "telegram",
+    "discord",
+    "slack",
+    "signal",
+    "terminal"
+  ],
+  "features": [
+    "thermodynamic-routing",
+    "kuramoto-coherence",
+    "isomorphic-security",
+    "resonance-rail",
+    "multi-agent-orchestration"
+  ],
+  "dependencies": {
+    "node": ">=20.0.0"
+  }
+}

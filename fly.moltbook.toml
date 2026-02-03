@@ -1,0 +1,24 @@
+# Fly.io config for Moltbook Engagement Daemon
+# Deploy: fly deploy -a agent-zero-moltbook -c fly.moltbook.toml
+
+app = "agent-zero-moltbook"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.moltbook"
+
+[env]
+  NODE_ENV = "production"
+  POLL_INTERVAL_MS = "1800000"
+  MAX_ENGAGEMENTS = "3"
+  AUTO_APPROVE_THRESHOLD = "0.8"
+
+[mounts]
+  source = "moltbook_data"
+  destination = "/data"
+
+# No services — daemon only, no inbound traffic
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

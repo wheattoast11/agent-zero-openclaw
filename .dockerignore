@@ -1,0 +1,12 @@
+src/browser/
+tests/
+node_modules/
+.git
+.github
+.claude
+docs/
+scripts/
+*.md
+*.zip
+.env*
+data/

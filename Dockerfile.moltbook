@@ -1,0 +1,20 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm ci --production
+
+# Copy built artifacts
+COPY dist/ ./dist/
+COPY bin/ ./bin/
+
+# Create data directory for vault + logs + queue
+RUN mkdir -p /data/.agent-zero/logs /data/.agent-zero/moltbook-queue
+
+# Link home to data volume so vault persists
+ENV HOME=/data
+
+# Default: supervised mode
+CMD ["node", "bin/agent-zero.js", "moltbook", "daemon", "--supervised"]
