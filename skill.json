@@ -5,7 +5,7 @@
   "author": "terminals.tech",
   "license": "MIT",
   "homepage": "https://terminals.tech",
-  "repository": "https://github.com/terminals-tech/agent-zero-openclaw",
+  "repository": "https://github.com/wheattoast11/agent-zero-openclaw",
   "entry": "dist/openclaw/skill.js",
   "triggers": [
     "@agent-zero",

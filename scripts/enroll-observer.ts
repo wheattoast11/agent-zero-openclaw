@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { OperationalVault } from '../src/identity/operationalVault.js';
 
 async function main() {

@@ -407,7 +407,7 @@ RAIL_ENDPOINT=wss://... # Override vault-stored rail endpoint
 
 ```bash
 # Clone and install
-git clone https://github.com/terminals-tech/agent-zero-openclaw
+git clone https://github.com/wheattoast11/agent-zero-openclaw
 cd agent-zero-openclaw
 npm install
 

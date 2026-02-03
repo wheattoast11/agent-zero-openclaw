@@ -42,3 +42,6 @@ npm-debug.log*
 
 # WhatsApp auth state
 wa-auth/
+
+# Claude Code skills (operational, not source)
+.claude/

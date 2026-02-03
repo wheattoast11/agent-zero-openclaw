@@ -1,11 +1,10 @@
 #!/usr/bin/env npx tsx
 /**
  * Seed the Operational Vault with initial rail secrets and enrollment.
- * Run once after deployment. Secrets are encrypted at rest via AES-256-GCM.
- *
- * Usage: npx tsx scripts/seed-vault.ts
+ * Loads .env automatically — just run: npx tsx scripts/seed-vault.ts
  */
 
+import 'dotenv/config';
 import { OperationalVault } from '../src/identity/operationalVault.js';
 
 async function main() {

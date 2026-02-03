@@ -1,13 +1,7 @@
 #!/usr/bin/env npx tsx
 /**
  * Rotate HMAC secrets for enrolled agents on the production Resonance Rail.
- *
- * Generates new secrets, re-enrolls via the rail's /enroll API,
- * updates the local operational vault, and optionally uploads
- * the vault to the Fly.io agency volume.
- *
- * Usage:
- *   VAULT_PASSPHRASE=<pass> RAIL_ADMIN_SECRET=<secret> npx tsx scripts/rotate-secrets.ts
+ * Loads .env automatically — just run: npx tsx scripts/rotate-secrets.ts
  *
  * Options:
  *   --dry-run       Show what would happen without making changes
@@ -15,6 +9,7 @@
  *   --rail-url      Override rail URL (default: https://space-terminals-tech.fly.dev)
  */
 
+import 'dotenv/config';
 import { randomBytes } from 'crypto';
 import { OperationalVault } from '../src/identity/operationalVault.js';
 

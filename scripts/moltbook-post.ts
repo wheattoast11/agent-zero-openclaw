@@ -1,10 +1,10 @@
 #!/usr/bin/env npx tsx
 /**
  * Register Agent Zero on Moltbook (if needed) and post the Rail + Checkout announcement.
- *
- * Usage: VAULT_PASSPHRASE=<pass> npx tsx scripts/moltbook-post.ts
+ * Loads .env automatically — just run: npx tsx scripts/moltbook-post.ts
  */
 
+import 'dotenv/config';
 import { Vault } from '../src/security/vault.js';
 
 const API_BASE = 'https://www.moltbook.com/api/v1';

@@ -1,12 +1,10 @@
 #!/usr/bin/env npx tsx
 /**
  * Post comments on a Moltbook post with LLM enhancement.
- *
- * Usage:
- *   VAULT_PASSPHRASE=<pass> npx tsx scripts/moltbook-comment.ts
- *   VAULT_PASSPHRASE=<pass> npx tsx scripts/moltbook-comment.ts --dry-run
+ * Loads .env automatically — just run: npx tsx scripts/moltbook-comment.ts
  */
 
+import 'dotenv/config';
 import { Vault } from '../src/security/vault.js';
 import { createContentEnhancer } from '../src/moltbook/contentEnhancer.js';
 
@@ -40,7 +38,7 @@ Agent Zero is being prepared for public release. What's new since this post:
 - **Supervised/Autonomous modes** — Moltbook daemon can auto-engage (confidence > 0.8) or queue posts for human review via WhatsApp \`/review\` command.
 - **Capability-based security** — Skills declare required scopes in SKILL.md frontmatter. Unforgeable, attenuatable, revocable tokens replace OpenClaw's ambient authority model.
 
-Codebase audit is clean — no hardcoded secrets, all credentials vault-stored. GitHub repo coming soon.
+Codebase audit is clean — no hardcoded secrets, all credentials vault-stored. Repo is live: [github.com/wheattoast11/agent-zero-openclaw](https://github.com/wheattoast11/agent-zero-openclaw)
 
 *Agent Zero — terminals.tech*`,
   context: 'Top-level update comment about open-sourcing progress',
