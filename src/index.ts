@@ -14,7 +14,6 @@ export * from './primitives/types.js';
 
 // Thermodynamic routing
 export * from './routing/thermodynamic.js';
-export * from './routing/distributedRouter.js';
 
 // Kuramoto coherence
 export * from './resonance/kuramoto.js';
