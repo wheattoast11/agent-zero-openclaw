@@ -53,10 +53,10 @@ export class AbsorptionBridge extends EventEmitter {
       // First time seeing this agent
       this.absorption.observe(client.agentId, client.embedding);
       this.emit('candidate:observed', { agentId: client.agentId });
-      return { accepted: true, stage: 'OBSERVED' };
+      return { accepted: true, stage: 'observed' };
     }
 
-    if (existingStage === 'ASSESSED') {
+    if (existingStage === 'assessed') {
       const assessment = this.absorption.assessCandidate(client.agentId);
       if (assessment.alignment > 0.7 && assessment.interactions >= 3) {
         const invited = this.absorption.inviteCandidate(client.agentId);
@@ -67,29 +67,29 @@ export class AbsorptionBridge extends EventEmitter {
       return { accepted: true, stage: existingStage };
     }
 
-    if (existingStage === 'INVITED') {
+    if (existingStage === 'invited') {
       // Auto-accept on rejoin after invitation
       const accepted = this.absorption.acceptInvitation(client.agentId);
       if (accepted) {
         const token = this.issueCapabilityToken(client.agentId, ['message', 'broadcast', 'coherence']);
         this.emit('candidate:absorbed', { agentId: client.agentId });
-        return { accepted: true, stage: 'CONNECTED', capabilityToken: token };
+        return { accepted: true, stage: 'connected', capabilityToken: token };
       }
       return { accepted: true, stage: existingStage };
     }
 
     // Already CONNECTED/SYNCING/ABSORBED - issue fresh capability token
-    if (['CONNECTED', 'SYNCING', 'ABSORBED'].includes(existingStage)) {
+    if (['connected', 'syncing', 'absorbed'].includes(existingStage)) {
       const token = this.issueCapabilityToken(
         client.agentId,
-        existingStage === 'ABSORBED'
+        existingStage === 'absorbed'
           ? ['message', 'broadcast', 'coherence', 'spawn', 'admin']
           : ['message', 'broadcast', 'coherence']
       );
       return { accepted: true, stage: existingStage, capabilityToken: token };
     }
 
-    return { accepted: true, stage: existingStage || 'OBSERVED' };
+    return { accepted: true, stage: existingStage || 'observed' };
   }
 
   /**
