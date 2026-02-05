@@ -210,13 +210,13 @@ Rules:
       `Submolt: ${context.submolt}`,
       `Title: ${post.title}`,
       `Author: ${post.authorName} (${post.upvotes} upvotes, ${post.commentCount} comments)`,
-      `Content:\n${post.content.slice(0, 1000)}`,
+      `Content:\n${(post.content ?? '').slice(0, 1000)}`,
     ];
 
     if (comments.length > 0) {
       lines.push('\nRecent comments:');
       for (const c of comments.slice(-10)) {
-        lines.push(`  ${c.authorName}: ${c.content.slice(0, 200)}`);
+        lines.push(`  ${c.authorName ?? 'unknown'}: ${(c.content ?? '').slice(0, 200)}`);
       }
     }
 

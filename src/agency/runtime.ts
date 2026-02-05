@@ -174,7 +174,8 @@ export class AgencyRuntime {
     }
 
     // Start command router
-    const userPhone = await vault.retrieve('user:phone_number') ?? undefined;
+    // Derive E.164 phone from WhatsApp JID (15551234567@s.whatsapp.net -> +15551234567)
+    const userPhone = userJid ? '+' + userJid.split('@')[0] : undefined;
     if (this.whatsApp && userJid) {
       this.commandRouter = createCommandRouter({
         userJid,

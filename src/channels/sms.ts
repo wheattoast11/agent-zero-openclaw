@@ -59,7 +59,7 @@ export class SmsAdapter extends EventEmitter implements ChannelAdapter {
         }
       });
 
-      this.server.listen(this.config.webhookPort, () => {
+      this.server.listen(this.config.webhookPort, '0.0.0.0', () => {
         this.status = 'connected';
         resolve();
       });
@@ -142,6 +142,8 @@ export class SmsAdapter extends EventEmitter implements ChannelAdapter {
       const params = new URLSearchParams(body);
       const from = params.get('From');
       const messageBody = params.get('Body');
+
+      console.log(`[SMS] Inbound from ${from}: ${messageBody?.slice(0, 50) ?? '(empty)'}`);
 
       if (from && messageBody) {
         const msg: Message = {

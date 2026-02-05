@@ -321,9 +321,10 @@ export class MoltbookDaemon extends EventEmitter<DaemonEvents> {
         await this.adapter.upvote(response.threadId);
         break;
       case 'post': {
-        const parts = response.content.split('\n---\n');
+        const content = response.content ?? '';
+        const parts = content.split('\n---\n');
         const title = parts[0] ?? 'Untitled';
-        const body = parts.slice(1).join('\n---\n') || response.content;
+        const body = parts.slice(1).join('\n---\n') || content;
         await this.adapter.createPost(title, body);
         break;
       }

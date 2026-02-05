@@ -67,7 +67,10 @@ export class CommandRouter {
     if (platform === 'sms') {
       // For SMS, match against userPhone (E.164 format)
       const userPhone = this.config.userPhone;
-      if (!userPhone || remoteJid !== userPhone) return;
+      if (!userPhone || remoteJid !== userPhone) {
+        console.log(`[SMS] Ignoring message from ${remoteJid} (expected ${userPhone ?? 'not configured'})`);
+        return;
+      }
       this.replyChannel = 'sms';
     } else {
       if (remoteJid !== this.config.userJid) return;
@@ -180,7 +183,7 @@ export class CommandRouter {
 
     const lines = [`*${pending.length} pending review:*`, ''];
     for (const item of pending.slice(0, 5)) {
-      const preview = item.response.content.slice(0, 80);
+      const preview = (item.response.content ?? '').slice(0, 80);
       lines.push(`[${item.id.slice(0, 8)}] ${item.response.action}: ${preview}...`);
       lines.push(`  Confidence: ${(item.response.confidence * 100).toFixed(0)}%`);
       lines.push('');
