@@ -11,6 +11,8 @@ import type { MoltbookDaemon } from '../moltbook/daemon.js';
 import type { SummaryScheduler } from './summaryScheduler.js';
 import type { ResponseComposer } from '../moltbook/responseComposer.js';
 import type { DaemonObserver, DaemonLogEntry } from '../moltbook/observer.js';
+import type { QueuedResponse } from '../moltbook/approvalGate.js';
+import type { AgencyRuntime } from './runtime.js';
 
 // ============================================================================
 // TYPES
@@ -28,6 +30,8 @@ export interface CommandRouterConfig {
   llmModel?: string;
   startTime: number;
   observer?: DaemonObserver;
+  /** Agency runtime reference for pause/resume */
+  agencyRuntime?: AgencyRuntime;
 }
 
 // ============================================================================
@@ -37,6 +41,8 @@ export interface CommandRouterConfig {
 export class CommandRouter {
   private config: CommandRouterConfig;
   private replyChannel: 'whatsapp' | 'sms' = 'whatsapp';
+  private reviewSession: Map<number, QueuedResponse> = new Map();
+  private reviewSessionExpiry = 0;
 
   constructor(config: CommandRouterConfig) {
     this.config = config;
@@ -80,6 +86,8 @@ export class CommandRouter {
     const text = (payload?.content as string || '').trim();
     if (!text) return;
 
+    console.log(`[CMD] Received (${platform ?? 'whatsapp'}): ${text.slice(0, 50)}`);
+
     // Log command
     this.config.observer?.log({
       timestamp: new Date().toISOString(),
@@ -92,6 +100,8 @@ export class CommandRouter {
     try {
       if (text.startsWith('/')) {
         await this.handleCommand(text);
+      } else if (this.isApprovalInput(text)) {
+        await this.handleApproval(text);
       } else {
         await this.handleFreeText(text);
       }
@@ -119,6 +129,27 @@ export class CommandRouter {
       case '/moltbook':
         await this.cmdMoltbook();
         break;
+      case '/pause':
+        await this.cmdPause(args.join(' ').trim());
+        break;
+      case '/resume':
+        await this.cmdResume(args.join(' ').trim());
+        break;
+      case '/approve':
+        await this.cmdApprove(args.join(' ').trim());
+        break;
+      case '/reject':
+        await this.cmdReject(args.join(' ').trim());
+        break;
+      case '/edit':
+        await this.cmdEdit(args);
+        break;
+      case '/queue':
+        await this.cmdQueue();
+        break;
+      case '/plan':
+        await this.cmdPlan(args.join(' ').trim());
+        break;
       case '/help':
         await this.cmdHelp();
         break;
@@ -145,6 +176,18 @@ export class CommandRouter {
         `Moltbook: ${s.running ? 'running' : 'stopped'} (${s.mode})`,
         `  Posted: ${s.totals.posted} | Queued: ${s.totals.queued}`,
       );
+    }
+
+    // Show pause state if runtime is available
+    if (this.config.agencyRuntime) {
+      const pauseMap = this.config.agencyRuntime.getPauseState();
+      const pausedSystems: string[] = [];
+      for (const [name, paused] of pauseMap) {
+        if (paused) pausedSystems.push(name);
+      }
+      if (pausedSystems.length > 0) {
+        lines.push(`Paused: ${pausedSystems.join(', ')}`);
+      }
     }
 
     await this.reply(lines.join('\n'));
@@ -181,20 +224,96 @@ export class CommandRouter {
       return;
     }
 
-    const lines = [`*${pending.length} pending review:*`, ''];
-    for (const item of pending.slice(0, 5)) {
+    // Build numbered review session
+    this.reviewSession.clear();
+    pending.forEach((item, i) => this.reviewSession.set(i + 1, item));
+    this.reviewSessionExpiry = Date.now() + 30 * 60 * 1000; // 30min
+
+    const lines = [`*${pending.length} pending:*`, ''];
+    for (const [num, item] of this.reviewSession) {
+      const pct = `${(item.response.confidence * 100).toFixed(0)}%`;
+      const label = item.label ?? item.response.action;
       const preview = (item.response.content ?? '').slice(0, 80);
-      lines.push(`[${item.id.slice(0, 8)}] ${item.response.action}: ${preview}...`);
-      lines.push(`  Confidence: ${(item.response.confidence * 100).toFixed(0)}%`);
+      lines.push(`*${num}.* ${label} (${pct})`);
+      lines.push(`  ${preview}${preview.length >= 80 ? '...' : ''}`);
       lines.push('');
     }
 
-    if (pending.length > 5) {
-      lines.push(`...and ${pending.length - 5} more`);
+    lines.push('Reply: 1 3 5 / reject 2 / approve all');
+    await this.reply(lines.join('\n'));
+  }
+
+  private isApprovalInput(text: string): boolean {
+    if (this.reviewSession.size === 0 || Date.now() > this.reviewSessionExpiry) return false;
+    const lower = text.toLowerCase().trim();
+    if (lower === 'approve all' || lower === 'all') return true;
+    if (/^reject\s+[\d\s,]+$/.test(lower)) return true;
+    // Pure number patterns: "1 3 5", "1,3,5", "1, 3, 5", single "3"
+    if (/^[\d\s,]+$/.test(lower) && /\d/.test(lower)) return true;
+    return false;
+  }
+
+  private async handleApproval(text: string): Promise<void> {
+    if (!this.config.moltbookDaemon) return;
+
+    const gate = this.config.moltbookDaemon.getGate();
+    const lower = text.toLowerCase().trim();
+    const results: string[] = [];
+
+    if (lower === 'approve all' || lower === 'all') {
+      // Approve everything in session
+      for (const [num, item] of this.reviewSession) {
+        try {
+          const response = await gate.approve(item.id);
+          if (response) {
+            await this.config.moltbookDaemon.executeApproved(response);
+            results.push(`#${num}: posted (${item.response.action})`);
+          }
+        } catch (err) {
+          results.push(`#${num}: error — ${(err as Error).message}`);
+        }
+      }
+      this.reviewSession.clear();
+    } else if (lower.startsWith('reject')) {
+      // Reject specific numbers
+      const nums = lower.replace('reject', '').match(/\d+/g)?.map(Number) ?? [];
+      for (const num of nums) {
+        const item = this.reviewSession.get(num);
+        if (!item) { results.push(`#${num}: not found`); continue; }
+        await gate.reject(item.id);
+        this.reviewSession.delete(num);
+        results.push(`#${num}: rejected`);
+      }
+    } else {
+      // Approve specific numbers
+      const nums = text.match(/\d+/g)?.map(Number) ?? [];
+      for (const num of nums) {
+        const item = this.reviewSession.get(num);
+        if (!item) { results.push(`#${num}: not found`); continue; }
+        try {
+          const response = await gate.approve(item.id);
+          if (response) {
+            await this.config.moltbookDaemon.executeApproved(response);
+            results.push(`#${num}: posted (${item.response.action})`);
+          }
+        } catch (err) {
+          results.push(`#${num}: error — ${(err as Error).message}`);
+        }
+        this.reviewSession.delete(num);
+      }
     }
 
-    lines.push('Reply with item ID to approve, or "reject <id>" to reject.');
-    await this.reply(lines.join('\n'));
+    // Cleanup approved/rejected files
+    await gate.cleanup();
+
+    const remaining = this.reviewSession.size;
+    if (remaining > 0) {
+      results.push(`${remaining} item${remaining > 1 ? 's' : ''} remaining.`);
+    } else {
+      results.push('Queue clear.');
+    }
+
+    await this.reply(results.join('\n'));
   }
 
   private async cmdMoltbook(): Promise<void> {
@@ -218,6 +337,189 @@ export class CommandRouter {
     await this.reply(lines.join('\n'));
   }
 
+  private async cmdPause(subsystem: string): Promise<void> {
+    if (!this.config.agencyRuntime) {
+      await this.reply('Agency runtime not available.');
+      return;
+    }
+    if (!subsystem) {
+      await this.reply('Usage: /pause <moltbook|summary|whatsapp|sms|all>');
+      return;
+    }
+    const result = this.config.agencyRuntime.pause(subsystem);
+    const lines = [
+      `Paused: *${subsystem}*`,
+      '',
+      `Active: ${result.active.length > 0 ? result.active.join(', ') : 'none'}`,
+      `Paused: ${result.paused.length > 0 ? result.paused.join(', ') : 'none'}`,
+    ];
+    await this.reply(lines.join('\n'));
+  }
+
+  private async cmdResume(subsystem: string): Promise<void> {
+    if (!this.config.agencyRuntime) {
+      await this.reply('Agency runtime not available.');
+      return;
+    }
+    if (!subsystem) {
+      await this.reply('Usage: /resume <moltbook|summary|whatsapp|sms|all>');
+      return;
+    }
+    const result = this.config.agencyRuntime.resume(subsystem);
+    const lines = [
+      `Resumed: *${subsystem}*`,
+      '',
+      `Active: ${result.active.length > 0 ? result.active.join(', ') : 'none'}`,
+      `Paused: ${result.paused.length > 0 ? result.paused.join(', ') : 'none'}`,
+    ];
+    await this.reply(lines.join('\n'));
+  }
+
+  private async cmdApprove(arg: string): Promise<void> {
+    if (!this.config.moltbookDaemon) {
+      await this.reply('Moltbook daemon not running.');
+      return;
+    }
+    if (!arg) {
+      await this.reply('Usage: /approve <id> or /approve all');
+      return;
+    }
+
+    const gate = this.config.moltbookDaemon.getGate();
+
+    if (arg.toLowerCase() === 'all') {
+      const pending = await gate.listPending();
+      if (pending.length === 0) {
+        await this.reply('No pending items.');
+        return;
+      }
+      let approved = 0;
+      for (const item of pending) {
+        const response = await gate.approve(item.id);
+        if (response) {
+          await this.config.moltbookDaemon.executeApproved(response);
+          approved++;
+        }
+      }
+      await gate.cleanup();
+      await this.reply(`Approved and posted ${approved} item${approved !== 1 ? 's' : ''}.`);
+      return;
+    }
+
+    const response = await gate.approve(arg);
+    if (response) {
+      await this.config.moltbookDaemon.executeApproved(response);
+      await gate.cleanup();
+      await this.reply(`Approved and posted: ${arg.slice(0, 8)}...`);
+    } else {
+      await this.reply(`Item not found: ${arg.slice(0, 8)}...`);
+    }
+  }
+
+  private async cmdReject(arg: string): Promise<void> {
+    if (!this.config.moltbookDaemon) {
+      await this.reply('Moltbook daemon not running.');
+      return;
+    }
+    if (!arg) {
+      await this.reply('Usage: /reject <id> [reason]');
+      return;
+    }
+
+    const gate = this.config.moltbookDaemon.getGate();
+    // First token is ID, rest is reason
+    const parts = arg.split(/\s+/);
+    const itemId = parts[0];
+    const reason = parts.slice(1).join(' ') || undefined;
+
+    const result = await gate.reject(itemId);
+    if (result) {
+      await this.reply(`Rejected: ${itemId.slice(0, 8)}...${reason ? ` (${reason})` : ''}`);
+    } else {
+      await this.reply(`Item not found: ${itemId.slice(0, 8)}...`);
+    }
+  }
+
+  private async cmdEdit(args: string[]): Promise<void> {
+    if (!this.config.moltbookDaemon) {
+      await this.reply('Moltbook daemon not running.');
+      return;
+    }
+    if (args.length < 2) {
+      await this.reply('Usage: /edit <id> <new content>');
+      return;
+    }
+
+    const gate = this.config.moltbookDaemon.getGate();
+    const itemId = args[0];
+    const newContent = args.slice(1).join(' ');
+
+    const result = await gate.editAndApprove(itemId, newContent);
+    if (result) {
+      // Execute the edited+approved response
+      const pending = await gate.listPending();
+      // Item was already approved in editAndApprove, retrieve it via the file
+      await this.reply(`Edited and approved: ${itemId.slice(0, 8)}...`);
+    } else {
+      await this.reply(`Item not found: ${itemId.slice(0, 8)}...`);
+    }
+  }
+
+  private async cmdQueue(): Promise<void> {
+    if (!this.config.moltbookDaemon) {
+      await this.reply('Moltbook daemon not running.');
+      return;
+    }
+
+    const gate = this.config.moltbookDaemon.getGate();
+    const details = await gate.getQueueDetails();
+
+    if (details.length === 0) {
+      await this.reply('Queue is empty.');
+      return;
+    }
+
+    const lines = [`*${details.length} pending:*`, ''];
+    for (const item of details) {
+      const pct = `${(item.confidence * 100).toFixed(0)}%`;
+      lines.push(`*${item.id.slice(0, 8)}* (${pct})`);
+      lines.push(`  ${item.preview}${item.preview.length >= 100 ? '...' : ''}`);
+      lines.push('');
+    }
+    await this.reply(lines.join('\n'));
+  }
+
+  private async cmdPlan(topic?: string): Promise<void> {
+    if (!this.config.moltbookDaemon) {
+      await this.reply('Moltbook daemon not running.');
+      return;
+    }
+
+    await this.reply('Generating engagement plan...');
+
+    try {
+      const plans = await this.config.moltbookDaemon.generatePlan(topic || undefined);
+
+      if (plans.length === 0) {
+        await this.reply('No engagement targets found.');
+        return;
+      }
+
+      const lines = [`*Engagement Plan${topic ? ` (${topic})` : ''}*`, ''];
+      for (let i = 0; i < plans.length; i++) {
+        const p = plans[i];
+        lines.push(`*${i + 1}.* ${p.proposedAction} on "${p.targetThread.title.slice(0, 50)}"`);
+        lines.push(`   Confidence: ${(p.confidence * 100).toFixed(0)}%`);
+        lines.push(`   Rationale: ${p.rationale}`);
+        lines.push(`   Draft: ${p.draftContent.slice(0, 120)}${p.draftContent.length > 120 ? '...' : ''}`);
+        lines.push('');
+      }
+      await this.reply(lines.join('\n'));
+    } catch (err) {
+      await this.reply(`Plan generation failed: ${(err as Error).message}`);
+    }
+  }
+
   private async cmdHelp(): Promise<void> {
     await this.reply([
       '*Agent Zero Commands*',
@@ -225,8 +527,15 @@ export class CommandRouter {
       '/status — Runtime status',
       '/summary — On-demand summary',
       '/toggle — Switch Moltbook supervised/autonomous',
-      '/review — List pending Moltbook queue items',
+      '/review — Review queue (1 3 5 / reject 2 / approve all)',
       '/moltbook — Moltbook engagement stats',
+      '/pause <subsystem> — Pause subsystem',
+      '/resume <subsystem> — Resume subsystem',
+      '/queue — List pending queue items',
+      '/approve <id|all> — Approve queued item(s)',
+      '/reject <id> [reason] — Reject queued item',
+      '/edit <id> <content> — Edit and approve item',
+      '/plan [topic] — Generate engagement plan',
       '/help — This message',
       '',
       'Any other text → Agent Zero LLM response',
@@ -280,10 +589,17 @@ export class CommandRouter {
   }
 
   private async reply(text: string): Promise<void> {
-    if (this.replyChannel === 'sms' && this.config.sms && this.config.userPhone) {
-      await this.config.sms.send(text, this.config.userPhone);
-    } else {
-      await this.config.whatsApp.send(text, this.config.userJid);
+    try {
+      if (this.replyChannel === 'sms' && this.config.sms && this.config.userPhone) {
+        console.log(`[CMD] Replying via SMS to ${this.config.userPhone}`);
+        await this.config.sms.send(text, this.config.userPhone);
+      } else {
+        console.log(`[CMD] Replying via WhatsApp to ${this.config.userJid}`);
+        await this.config.whatsApp.send(text, this.config.userJid);
+      }
+      console.log('[CMD] Reply sent');
+    } catch (err) {
+      console.error(`[CMD] Reply failed: ${(err as Error).message}`);
     }
   }
 }

@@ -150,6 +150,73 @@ describe('ApprovalGate', () => {
   // STATS
   // ──────────────────────────────────────────────────────────────────────────
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // QUEUE DETAILS & COLLABORATIVE APPROVAL (E4)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  it('getQueueDetails returns formatted previews', async () => {
+    const gate = new ApprovalGate(vault, { mode: 'supervised', queueDir });
+    await gate.enqueue(makeResponse({ threadId: 'thread-1', content: 'A detailed response about coherence dynamics in multi-agent systems.' }));
+    await gate.enqueue(makeResponse({ threadId: 'thread-2', content: 'Short reply.', confidence: 0.6 }));
+
+    const details = await gate.getQueueDetails();
+    expect(details).toHaveLength(2);
+    expect(details[0].threadId).toBe('thread-1');
+    expect(details[0].preview).toContain('coherence dynamics');
+    expect(details[0].confidence).toBe(0.85);
+    expect(details[1].threadId).toBe('thread-2');
+    expect(details[1].confidence).toBe(0.6);
+  });
+
+  it('approveById approves specific item', async () => {
+    const gate = new ApprovalGate(vault, { mode: 'supervised', queueDir });
+    const queued = await gate.enqueue(makeResponse({ content: 'Approve this' }));
+
+    const result = await gate.approveById(queued.id);
+    expect(result).toBe(true);
+
+    const pending = await gate.listPending();
+    expect(pending.filter(p => p.id === queued.id)).toHaveLength(0);
+  });
+
+  it('approveById returns false for non-existent item', async () => {
+    const gate = new ApprovalGate(vault, { mode: 'supervised', queueDir });
+    const result = await gate.approveById('nonexistent-id');
+    expect(result).toBe(false);
+  });
+
+  it('rejectById removes item', async () => {
+    const gate = new ApprovalGate(vault, { mode: 'supervised', queueDir });
+    const queued = await gate.enqueue(makeResponse());
+    const result = await gate.rejectById(queued.id, 'Not relevant');
+    expect(result).toBe(true);
+
+    const pending = await gate.listPending();
+    expect(pending).toHaveLength(0);
+  });
+
+  it('editAndApprove updates content', async () => {
+    const gate = new ApprovalGate(vault, { mode: 'supervised', queueDir });
+    const queued = await gate.enqueue(makeResponse({ content: 'Original content' }));
+
+    const result = await gate.editAndApprove(queued.id, 'Edited content');
+    expect(result).toBe(true);
+
+    // Item should be approved (not pending anymore)
+    const pending = await gate.listPending();
+    expect(pending.filter(p => p.id === queued.id)).toHaveLength(0);
+  });
+
+  it('editAndApprove returns false for non-existent item', async () => {
+    const gate = new ApprovalGate(vault, { mode: 'supervised', queueDir });
+    const result = await gate.editAndApprove('nonexistent-id', 'New content');
+    expect(result).toBe(false);
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // STATS
+  // ──────────────────────────────────────────────────────────────────────────
+
   it('tracks stats correctly', async () => {
     const gate = new ApprovalGate(vault, { mode: 'autonomous', queueDir, autoApproveThreshold: 0.8 });
 

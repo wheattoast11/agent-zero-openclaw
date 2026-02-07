@@ -5,7 +5,7 @@
  * adaptive coupling, and flood attack detection.
  */
 
-import { KuramotoEngine, type KuramotoConfig, type Oscillator } from './kuramoto.js';
+import { KuramotoEngine, computeCoherence, type KuramotoConfig, type Oscillator } from './kuramoto.js';
 import type { Observer } from '../primitives/types.js';
 
 export interface GlobalKuramotoConfig extends KuramotoConfig {
@@ -15,6 +15,8 @@ export interface GlobalKuramotoConfig extends KuramotoConfig {
   minCoupling: number;
   maxCoupling: number;
   groupthinkThreshold: number;
+  /** Cross-model coupling factor: cross-model pairs couple at K * this factor (default 0.7) */
+  crossModelCouplingFactor: number;
 }
 
 const DEFAULT_GLOBAL_CONFIG: GlobalKuramotoConfig = {
@@ -23,12 +25,15 @@ const DEFAULT_GLOBAL_CONFIG: GlobalKuramotoConfig = {
   targetCoherence: 0.8,
   coherenceThreshold: 0.3,
   dt: 100,
+  convergenceTimeoutTicks: 300,
+  convergenceMinDelta: 0.01,
   broadcastHz: 1,
   staleTTL: 30000,
   adaptiveCoupling: true,
   minCoupling: 0.1,
   maxCoupling: 1.5,
   groupthinkThreshold: 0.95,
+  crossModelCouplingFactor: 0.7,
 };
 
 interface NetworkOscillator {
@@ -36,6 +41,7 @@ interface NetworkOscillator {
   lastReported: number;
   networkLatency: number;
   trustScore: number;
+  modelType?: string;
 }
 
 export class GlobalKuramotoEngine {
@@ -69,7 +75,7 @@ export class GlobalKuramotoEngine {
     }
   }
 
-  addAgent(observer: { id: string; name: string; frequency: number; phase: number }): void {
+  addAgent(observer: { id: string; name: string; frequency: number; phase: number; modelType?: string }): void {
     this.engine.addObserver({
       id: observer.id,
       name: observer.name,
@@ -85,6 +91,7 @@ export class GlobalKuramotoEngine {
       lastReported: Date.now(),
       networkLatency: 0,
       trustScore: 1.0,
+      modelType: observer.modelType,
     });
   }
 
@@ -97,11 +104,70 @@ export class GlobalKuramotoEngine {
   tick(): { coherence: number; phases: Map<string, number>; adaptedK: number } {
     const result = this.engine.tick();
 
+    // Post-tick: apply cross-model coupling reduction
+    this.applyCrossModelCorrection();
+
     if (this.config.adaptiveCoupling) {
       this.adaptCoupling(result.coherence);
     }
 
-    return { ...result, adaptedK: this.currentCoupling };
+    // Recompute coherence after correction
+    const correctedCoherence = this.engine.getCoherence();
+
+    return { coherence: correctedCoherence, phases: result.phases, adaptedK: this.currentCoupling };
+  }
+
+  /**
+   * Apply reduced coupling between oscillators of different model types.
+   * The base KuramotoEngine applies uniform coupling K to all pairs.
+   * This post-tick step partially reverts phase changes from cross-model
+   * pairs so they effectively couple at K * crossModelCouplingFactor.
+   */
+  private applyCrossModelCorrection(): void {
+    const oscillators = this.engine.getOscillators();
+    const factor = this.config.crossModelCouplingFactor ?? 0.7;
+    const N = oscillators.length;
+
+    // No correction needed if factor is 1 or fewer than 2 oscillators
+    if (factor >= 1.0 || N < 2) return;
+
+    // Check if any oscillators have model types assigned
+    let hasModelTypes = false;
+    for (const osc of oscillators) {
+      const meta = this.networkMeta.get(osc.id);
+      if (meta?.modelType) {
+        hasModelTypes = true;
+        break;
+      }
+    }
+    if (!hasModelTypes) return;
+
+    for (const osc of oscillators) {
+      const meta = this.networkMeta.get(osc.id);
+      if (!meta?.modelType) continue;
+
+      let crossModelInfluence = 0;
+
+      for (const other of oscillators) {
+        if (other.id === osc.id) continue;
+        const otherMeta = this.networkMeta.get(other.id);
+        if (otherMeta?.modelType && otherMeta.modelType !== meta.modelType) {
+          crossModelInfluence += Math.sin(other.phase - osc.phase);
+        }
+      }
+
+      // The engine applied full coupling K/N * sin(diff) * dt to all pairs.
+      // Cross-model pairs should only couple at factor * K, so revert (1-factor) portion.
+      if (crossModelInfluence !== 0) {
+        const revertAmount =
+          (this.currentCoupling / N) *
+          crossModelInfluence *
+          (1 - factor) *
+          (this.config.dt / 1000);
+        osc.phase -= revertAmount;
+        osc.observer.phase = osc.phase;
+      }
+    }
   }
 
   private adaptCoupling(coherence: number): void {
@@ -161,6 +227,45 @@ export class GlobalKuramotoEngine {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Calculate per-model-type Kuramoto order parameter.
+   * Groups oscillators by modelType and computes coherence within each group.
+   * Oscillators without a modelType are grouped under the key 'unknown'.
+   */
+  getCoherenceByModel(): Map<string, number> {
+    const oscillators = this.engine.getOscillators();
+    const groups = new Map<string, Oscillator[]>();
+
+    for (const osc of oscillators) {
+      const meta = this.networkMeta.get(osc.id);
+      const modelType = meta?.modelType ?? 'unknown';
+      const group = groups.get(modelType);
+      if (group) {
+        group.push(osc);
+      } else {
+        groups.set(modelType, [osc]);
+      }
+    }
+
+    const result = new Map<string, number>();
+    for (const [modelType, oscs] of groups) {
+      result.set(modelType, computeCoherence(oscs));
+    }
+    return result;
+  }
+
+  /**
+   * Check if any model-specific cluster exceeds the groupthink threshold.
+   */
+  getGroupthinkByModel(): Map<string, boolean> {
+    const coherenceByModel = this.getCoherenceByModel();
+    const result = new Map<string, boolean>();
+    for (const [modelType, coherence] of coherenceByModel) {
+      result.set(modelType, coherence > this.config.groupthinkThreshold);
+    }
+    return result;
   }
 
   // Compatibility methods for drop-in replacement of KuramotoEngine in server.ts

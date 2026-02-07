@@ -523,8 +523,12 @@ export class WhatsAppAdapter extends EventEmitter implements ChannelAdapter {
   private handleIncomingMessage(msg: BaileysMessage): void {
     // Allow "Message Yourself" / self-chat messages (for command routing)
     // but skip other fromMe messages (echoes of our own sends)
+    const ownJid = `${this.socket?.user?.id?.split(':')[0]}@s.whatsapp.net`;
     const isSelfChat = msg.key.fromMe && msg.key.remoteJid?.endsWith('@s.whatsapp.net')
-      && msg.key.remoteJid === `${this.socket?.user?.id?.split(':')[0]}@s.whatsapp.net`;
+      && msg.key.remoteJid === ownJid;
+
+    console.log(`[WA] Message: fromMe=${msg.key.fromMe} remote=${msg.key.remoteJid} ownJid=${ownJid} isSelfChat=${isSelfChat}`);
+
     if (msg.key.fromMe && !isSelfChat) return;
 
     const text = this.extractMessageText(msg);

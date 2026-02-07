@@ -6,6 +6,7 @@
  * - Maps clientId -> WebSocket for message routing
  * - Heartbeat ping/pong every 10s
  * - HTTP health endpoint at GET /health
+ * - HTTP endpoints for pause/resume, traces, search, synthesis
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
@@ -14,6 +15,7 @@ import { ResonanceRailServer, type RailMessage, type RailClient } from './server
 import { ClientRateLimiter } from './clientRateLimiter.js';
 import { createRailPersistence, type PGliteRailPersistence } from './persistence.js';
 import { createMetadataBroadcaster, type MetadataBroadcaster } from './metadataBroadcaster.js';
+import { RailPluginManager } from './plugin.js';
 import { verifyUserToken } from './jwtVerifier.js';
 import { UserSessionManager } from './userSessionManager.js';
 import { AbsorptionProtocol } from '../coherence/absorption.js';
@@ -42,6 +44,9 @@ interface TrackedSocket {
 const MAX_CONNECTIONS = 200;
 const MAX_OBSERVERS = 50;
 
+// GoAway grace period for graceful shutdown
+const GOAWAY_GRACE_MS = 5000;
+
 // ============================================================================
 // WS SERVER
 // ============================================================================
@@ -56,6 +61,7 @@ export class RailWebSocketServer {
   private rateLimiter: ClientRateLimiter;
   private persistence?: PGliteRailPersistence;
   private metadataBroadcaster?: MetadataBroadcaster;
+  private pluginManager: RailPluginManager;
   private userSessionManager: UserSessionManager = new UserSessionManager();
 
   constructor(config: WsServerConfig) {
@@ -63,6 +69,10 @@ export class RailWebSocketServer {
     const absorptionProtocol = new AbsorptionProtocol();
     this.rail = new ResonanceRailServer(absorptionProtocol);
     this.rateLimiter = new ClientRateLimiter();
+
+    // Initialize plugin manager and wire to rail
+    this.pluginManager = new RailPluginManager(this.rail);
+    this.rail.setPluginManager(this.pluginManager);
 
     this.httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
       this.handleHttp(req, res);
@@ -98,6 +108,9 @@ export class RailWebSocketServer {
       this.persistence = createRailPersistence(dataDir);
       await this.persistence.init();
       railLog.info('rail', 'Persistence initialized', { dataDir });
+
+      // Wire persistence to rail server
+      this.rail.setPersistence(this.persistence);
 
       // Restore enrollments from persistence
       try {
@@ -156,7 +169,12 @@ export class RailWebSocketServer {
     }
 
     this.metadataBroadcaster?.stop();
-    this.rail.stop();
+
+    // D1: Graceful GoAway shutdown with 5s grace period
+    this.rail.stop(GOAWAY_GRACE_MS);
+
+    // Wait for grace period to allow clients to disconnect
+    await new Promise<void>(resolve => setTimeout(resolve, GOAWAY_GRACE_MS + 100));
 
     // Close all WebSocket connections
     for (const tracked of this.sockets.values()) {
@@ -222,7 +240,7 @@ export class RailWebSocketServer {
           };
           this.sockets.set(observerId, tracked);
 
-          // Send sync with current state
+          // Send sync with current state (includes lastSeq for D2 replay)
           this.sendTo(tracked, {
             type: 'sync',
             agentId: 'server',
@@ -236,6 +254,7 @@ export class RailWebSocketServer {
                 platform: c.platform,
               })),
               observer: true,
+              lastSeq: this.rail.getMessageSeq(),
             },
             timestamp: Date.now(),
           });
@@ -303,6 +322,7 @@ export class RailWebSocketServer {
               })),
               sessionToken: session.sessionToken,
               reconnectToken: result.reconnectToken,
+              lastSeq: this.rail.getMessageSeq(),
             },
             timestamp: Date.now(),
           });
@@ -342,7 +362,7 @@ export class RailWebSocketServer {
         // Persist join
         this.persistence?.recordSession(result.client, 'join').catch(() => {});
 
-        // Send join acknowledgement with reconnect token
+        // Send join acknowledgement with reconnect token and lastSeq (D2)
         this.sendTo(tracked, {
           type: 'sync',
           agentId: 'server',
@@ -356,6 +376,7 @@ export class RailWebSocketServer {
               platform: c.platform,
             })),
             reconnectToken: result.reconnectToken,
+            lastSeq: this.rail.getMessageSeq(),
           },
           timestamp: Date.now(),
         });
@@ -454,7 +475,20 @@ export class RailWebSocketServer {
   }
 
   // ==========================================================================
-  // HTTP HEALTH
+  // HTTP REQUEST BODY HELPER
+  // ==========================================================================
+
+  private readBody(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      req.on('end', () => resolve(body));
+      req.on('error', reject);
+    });
+  }
+
+  // ==========================================================================
+  // HTTP ENDPOINTS
   // ==========================================================================
 
   private handleHttp(req: IncomingMessage, res: ServerResponse): void {
@@ -479,6 +513,7 @@ export class RailWebSocketServer {
       return;
     }
 
+    // ---- GET /health ----
     if (req.method === 'GET' && url === '/health') {
       const stats = this.rail.getStats();
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -488,21 +523,25 @@ export class RailWebSocketServer {
         agents: stats.connectedAgents,
         coherence: stats.globalCoherence,
         messages: stats.messagesProcessed,
+        paused: stats.paused,
         observers: Array.from(this.sockets.values()).filter(s => s.observer).length,
       }));
       return;
     }
 
+    // ---- GET /stats ----
     if (req.method === 'GET' && url === '/stats') {
       const stats = this.rail.getStats();
       const securityStats = this.rail.getSecurityStats(3600_000);
       const coherenceStats = this.rail.getCoherenceStats();
       const userSessions = this.userSessionManager.getActiveCount();
+      const plugins = this.pluginManager.listPlugins();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ stats, security: securityStats, coherence: coherenceStats, userSessions }));
+      res.end(JSON.stringify({ stats, security: securityStats, coherence: coherenceStats, userSessions, plugins }));
       return;
     }
 
+    // ---- GET /metrics ----
     if (req.method === 'GET' && url === '/metrics') {
       const stats = this.rail.getStats();
       const lines = [
@@ -518,12 +557,138 @@ export class RailWebSocketServer {
         `# HELP rail_uptime_seconds Server uptime`,
         `# TYPE rail_uptime_seconds counter`,
         `rail_uptime_seconds ${stats.uptimeSeconds}`,
+        `# HELP rail_paused Server paused state`,
+        `# TYPE rail_paused gauge`,
+        `rail_paused ${stats.paused ? 1 : 0}`,
       ];
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end(lines.join('\n') + '\n');
       return;
     }
 
+    // ---- POST /pause (A1) ----
+    if (req.method === 'POST' && url === '/pause') {
+      const snapshot = this.rail.pause();
+      // Persist pause state if persistence available
+      if (this.persistence) {
+        this.persistence.savePauseState(snapshot.phases, snapshot.coherence).catch(err => {
+          railLog.warn('rail', 'Failed to persist pause state', { error: String(err) });
+        });
+      }
+      const phasesObj: Record<string, number> = {};
+      for (const [k, v] of snapshot.phases) {
+        phasesObj[k] = v;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        paused: true,
+        coherence: snapshot.coherence,
+        phases: phasesObj,
+        agentCount: Object.keys(phasesObj).length,
+      }));
+      return;
+    }
+
+    // ---- POST /resume (A1) ----
+    if (req.method === 'POST' && url === '/resume') {
+      this.rail.resume();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        paused: false,
+        coherence: this.rail.getStats().globalCoherence,
+      }));
+      return;
+    }
+
+    // ---- GET /traces (A2/A3) ----
+    if (req.method === 'GET' && url.startsWith('/traces')) {
+      if (!this.persistence) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Persistence unavailable' }));
+        return;
+      }
+
+      // Parse query params
+      const urlObj = new URL(url, `http://localhost:${this.config.port}`);
+      const agentId = urlObj.searchParams.get('agent') ?? undefined;
+      const kind = urlObj.searchParams.get('kind') ?? undefined;
+      const limitStr = urlObj.searchParams.get('limit');
+      const sinceStr = urlObj.searchParams.get('since');
+      const limit = limitStr ? parseInt(limitStr, 10) : 50;
+      const since = sinceStr ? parseInt(sinceStr, 10) : undefined;
+
+      this.persistence.searchTraces({ agentId, kind, limit, since })
+        .then(traces => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ traces, total: traces.length }));
+        })
+        .catch(err => {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: String(err) }));
+        });
+      return;
+    }
+
+    // ---- POST /traces/search (A3) ----
+    if (req.method === 'POST' && url === '/traces/search') {
+      if (!this.persistence) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Persistence unavailable' }));
+        return;
+      }
+
+      this.readBody(req).then(body => {
+        let parsed: { embedding?: number[]; limit?: number };
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+          return;
+        }
+
+        return this.persistence!.searchTraces({
+          embedding: parsed.embedding,
+          limit: parsed.limit,
+        }).then(traces => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ traces, total: traces.length }));
+        });
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: String(err) }));
+      });
+      return;
+    }
+
+    // ---- POST /synthesize (A3) ----
+    if (req.method === 'POST' && url === '/synthesize') {
+      this.readBody(req).then(body => {
+        let parsed: { query?: string; embedding?: number[]; agentIds?: string[]; limit?: number };
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+          return;
+        }
+
+        return this.rail.synthesize({
+          embedding: parsed.embedding,
+          agentIds: parsed.agentIds,
+          limit: parsed.limit,
+        }).then(result => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        });
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: String(err) }));
+      });
+      return;
+    }
+
+    // ---- POST /enroll ----
     if (req.method === 'POST' && url === '/enroll') {
       const adminSecret = process.env['RAIL_ADMIN_SECRET'];
       if (!adminSecret) {
@@ -539,9 +704,7 @@ export class RailWebSocketServer {
         return;
       }
 
-      let body = '';
-      req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
+      this.readBody(req).then(body => {
         try {
           const { agentId, secret: providedSecret } = JSON.parse(body) as { agentId: string; secret?: string };
           if (!agentId) {
@@ -562,10 +725,46 @@ export class RailWebSocketServer {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid JSON' }));
         }
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: String(err) }));
       });
       return;
     }
 
+    // ---- GET /replay (D2) ----
+    if (req.method === 'GET' && url.startsWith('/replay')) {
+      if (!this.persistence) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Persistence unavailable' }));
+        return;
+      }
+
+      const urlObj = new URL(url, `http://localhost:${this.config.port}`);
+      const fromStr = urlObj.searchParams.get('from');
+      const limitStr = urlObj.searchParams.get('limit');
+      const from = fromStr ? parseInt(fromStr, 10) : 0;
+      const limit = limitStr ? parseInt(limitStr, 10) : undefined;
+
+      if (isNaN(from) || from < 0) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "from" parameter' }));
+        return;
+      }
+
+      this.persistence.replayMessages(from, limit)
+        .then(messages => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ messages, total: messages.length }));
+        })
+        .catch(err => {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: String(err) }));
+        });
+      return;
+    }
+
+    // ---- GET /agents ----
     if (req.method === 'GET' && url === '/agents') {
       const clients = this.rail.getClients();
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -581,6 +780,7 @@ export class RailWebSocketServer {
       return;
     }
 
+    // ---- GET /.well-known/resonance-rail ----
     if (req.method === 'GET' && (url === '/.well-known/resonance-rail' || url === '/.well-known/resonance-rail.json')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -588,7 +788,7 @@ export class RailWebSocketServer {
         version: '0.2.0',
         protocol: 'resonance-rail-v1',
         absorption: true,
-        capabilities: ['kuramoto', 'thermodynamic-routing', 'semantic-search'],
+        capabilities: ['kuramoto', 'thermodynamic-routing', 'semantic-search', 'traces', 'synthesis', 'plugins'],
         enrollment: 'https://space.terminals.tech/enroll',
         auth_methods: ['hmac-sha256', 'jwt', 'observer'],
         join_schema: {
@@ -618,6 +818,10 @@ export class RailWebSocketServer {
 
   getConnectedCount(): number {
     return this.sockets.size;
+  }
+
+  getPluginManager(): RailPluginManager {
+    return this.pluginManager;
   }
 }
 

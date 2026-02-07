@@ -251,10 +251,10 @@ describe('CommandRouter', () => {
     });
 
     const reply = whatsApp.sent[0].text;
-    expect(reply).toContain('1 pending review');
-    expect(reply).toContain('abcd1234');
+    expect(reply).toContain('1 pending');
     expect(reply).toContain('comment');
     expect(reply).toContain('85%');
+    expect(reply).toContain('approve all');
   });
 
   it('/review shows "No pending items" when empty', async () => {
@@ -425,6 +425,316 @@ describe('CommandRouter', () => {
       expect(sms.sent).toHaveLength(0);
       expect(whatsApp.sent).toHaveLength(0);
     });
+  });
+
+  // --------------------------------------------------------------------------
+  // /pause and /resume
+  // --------------------------------------------------------------------------
+
+  function createMockRuntime() {
+    const pauseState = new Map<string, boolean>();
+    return {
+      pause: (subsystem: string) => {
+        const targets = subsystem === 'all'
+          ? ['moltbook', 'summary', 'whatsapp', 'sms']
+          : [subsystem];
+        for (const t of targets) pauseState.set(t, true);
+        const paused: string[] = [];
+        const active: string[] = [];
+        for (const name of ['moltbook', 'summary', 'whatsapp', 'sms']) {
+          if (pauseState.get(name)) paused.push(name);
+          else active.push(name);
+        }
+        return { paused, active };
+      },
+      resume: (subsystem: string) => {
+        const targets = subsystem === 'all'
+          ? ['moltbook', 'summary', 'whatsapp', 'sms']
+          : [subsystem];
+        for (const t of targets) pauseState.set(t, false);
+        const paused: string[] = [];
+        const active: string[] = [];
+        for (const name of ['moltbook', 'summary', 'whatsapp', 'sms']) {
+          if (pauseState.get(name)) paused.push(name);
+          else active.push(name);
+        }
+        return { paused, active };
+      },
+      getPauseState: () => new Map(pauseState),
+      pauseState,
+    };
+  }
+
+  it('/pause moltbook pauses moltbook subsystem', async () => {
+    const runtime = createMockRuntime();
+    router = buildRouter({ agencyRuntime: runtime });
+    whatsApp.simulateMessage(makeMsg('/pause moltbook', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+
+    const reply = whatsApp.sent[0].text;
+    expect(reply).toContain('Paused: *moltbook*');
+    expect(runtime.pauseState.get('moltbook')).toBe(true);
+  });
+
+  it('/resume moltbook resumes moltbook subsystem', async () => {
+    const runtime = createMockRuntime();
+    router = buildRouter({ agencyRuntime: runtime });
+
+    // Pause first
+    whatsApp.simulateMessage(makeMsg('/pause moltbook', USER_JID));
+    await vi.waitFor(() => expect(whatsApp.sent).toHaveLength(1));
+
+    // Resume
+    whatsApp.simulateMessage(makeMsg('/resume moltbook', USER_JID));
+    await vi.waitFor(() => expect(whatsApp.sent).toHaveLength(2));
+
+    const reply = whatsApp.sent[1].text;
+    expect(reply).toContain('Resumed: *moltbook*');
+    expect(runtime.pauseState.get('moltbook')).toBe(false);
+  });
+
+  it('/pause all pauses all subsystems', async () => {
+    const runtime = createMockRuntime();
+    router = buildRouter({ agencyRuntime: runtime });
+    whatsApp.simulateMessage(makeMsg('/pause all', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+
+    const reply = whatsApp.sent[0].text;
+    expect(reply).toContain('Paused: *all*');
+    expect(reply).toContain('moltbook');
+    expect(reply).toContain('summary');
+    expect(reply).toContain('whatsapp');
+    expect(reply).toContain('sms');
+  });
+
+  it('/status shows pause state when subsystems are paused', async () => {
+    const runtime = createMockRuntime();
+    runtime.pauseState.set('moltbook', true);
+    router = buildRouter({ agencyRuntime: runtime });
+
+    whatsApp.simulateMessage(makeMsg('/status', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+
+    const reply = whatsApp.sent[0].text;
+    expect(reply).toContain('Paused: moltbook');
+  });
+
+  it('/pause without subsystem shows usage', async () => {
+    const runtime = createMockRuntime();
+    router = buildRouter({ agencyRuntime: runtime });
+    whatsApp.simulateMessage(makeMsg('/pause', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+
+    expect(whatsApp.sent[0].text).toContain('Usage');
+  });
+
+  it('/pause without agencyRuntime sends not-available', async () => {
+    router = buildRouter();
+    whatsApp.simulateMessage(makeMsg('/pause moltbook', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+
+    expect(whatsApp.sent[0].text).toContain('Agency runtime not available');
+  });
+
+  // --------------------------------------------------------------------------
+  // /queue — list pending items
+  // --------------------------------------------------------------------------
+
+  it('/queue lists pending items', async () => {
+    const daemon = createMockDaemon({
+      getGate: () => ({
+        listPending: async () => [
+          {
+            id: 'abcd1234-5678-9abc-def0-123456789abc',
+            response: { threadId: 't1', content: 'This is a test response about coherence', confidence: 0.85, reasoning: 'test', action: 'comment' },
+            queuedAt: new Date().toISOString(),
+            status: 'pending' as const,
+          },
+        ],
+        getQueueDetails: async () => [
+          {
+            id: 'abcd1234-5678-9abc-def0-123456789abc',
+            threadId: 't1',
+            content: 'This is a test response about coherence',
+            confidence: 0.85,
+            createdAt: Date.now(),
+            preview: 'This is a test response about coherence',
+          },
+        ],
+      }),
+    });
+    router = buildRouter({ moltbookDaemon: daemon });
+    whatsApp.simulateMessage(makeMsg('/queue', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+
+    const reply = whatsApp.sent[0].text;
+    expect(reply).toContain('1 pending');
+    expect(reply).toContain('abcd1234');
+    expect(reply).toContain('85%');
+  });
+
+  it('/queue shows empty when no items', async () => {
+    const daemon = createMockDaemon({
+      getGate: () => ({
+        listPending: async () => [],
+        getQueueDetails: async () => [],
+      }),
+    });
+    router = buildRouter({ moltbookDaemon: daemon });
+    whatsApp.simulateMessage(makeMsg('/queue', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+    expect(whatsApp.sent[0].text).toContain('Queue is empty');
+  });
+
+  // --------------------------------------------------------------------------
+  // /approve <id> — approve specific item
+  // --------------------------------------------------------------------------
+
+  it('/approve <id> approves item', async () => {
+    const approvedFn = vi.fn(async () => ({
+      threadId: 't1', content: 'Test', confidence: 0.9, reasoning: 'test', action: 'comment' as const,
+    }));
+    const executeFn = vi.fn(async () => {});
+    const daemon = createMockDaemon({
+      getGate: () => ({
+        listPending: async () => [],
+        approve: approvedFn,
+        cleanup: async () => 0,
+        getQueueDetails: async () => [],
+      }),
+      executeApproved: executeFn,
+    });
+    router = buildRouter({ moltbookDaemon: daemon });
+    whatsApp.simulateMessage(makeMsg('/approve abcd1234-5678-9abc-def0-123456789abc', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+
+    expect(approvedFn).toHaveBeenCalledWith('abcd1234-5678-9abc-def0-123456789abc');
+    expect(executeFn).toHaveBeenCalledOnce();
+    expect(whatsApp.sent[0].text).toContain('Approved and posted');
+  });
+
+  it('/approve without args shows usage', async () => {
+    const daemon = createMockDaemon();
+    router = buildRouter({ moltbookDaemon: daemon });
+    whatsApp.simulateMessage(makeMsg('/approve', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+    expect(whatsApp.sent[0].text).toContain('Usage');
+  });
+
+  // --------------------------------------------------------------------------
+  // /reject <id> — reject specific item
+  // --------------------------------------------------------------------------
+
+  it('/reject <id> rejects item', async () => {
+    const rejectFn = vi.fn(async () => true);
+    const daemon = createMockDaemon({
+      getGate: () => ({
+        listPending: async () => [],
+        reject: rejectFn,
+        getQueueDetails: async () => [],
+      }),
+    });
+    router = buildRouter({ moltbookDaemon: daemon });
+    whatsApp.simulateMessage(makeMsg('/reject abcd1234 not relevant', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+
+    expect(rejectFn).toHaveBeenCalledWith('abcd1234');
+    expect(whatsApp.sent[0].text).toContain('Rejected');
+  });
+
+  // --------------------------------------------------------------------------
+  // /plan — generates engagement drafts
+  // --------------------------------------------------------------------------
+
+  it('/plan generates engagement drafts', async () => {
+    const generatePlanFn = vi.fn(async () => [
+      {
+        targetThread: { id: 't1', title: 'Kuramoto coherence patterns', submolt: 'general' },
+        proposedAction: 'comment' as const,
+        draftContent: 'Phase-locking enables emergent coordination.',
+        rationale: 'High alignment with identity vectors.',
+        confidence: 0.85,
+      },
+      {
+        targetThread: { id: 't2', title: 'Thermodynamic routing in agents', submolt: 'general' },
+        proposedAction: 'comment' as const,
+        draftContent: 'Boltzmann sampling minimizes free energy.',
+        rationale: 'Core topic, good engagement potential.',
+        confidence: 0.75,
+      },
+    ]);
+    const daemon = createMockDaemon({
+      generatePlan: generatePlanFn,
+    });
+    router = buildRouter({ moltbookDaemon: daemon });
+    whatsApp.simulateMessage(makeMsg('/plan', USER_JID));
+
+    await vi.waitFor(() => {
+      // First reply is "Generating..." then the plan
+      expect(whatsApp.sent.length).toBeGreaterThanOrEqual(2);
+    });
+
+    const planReply = whatsApp.sent[1].text;
+    expect(planReply).toContain('Engagement Plan');
+    expect(planReply).toContain('Kuramoto coherence');
+    expect(planReply).toContain('85%');
+    expect(planReply).toContain('Phase-locking');
+  });
+
+  it('/plan with topic passes topic to generatePlan', async () => {
+    const generatePlanFn = vi.fn(async () => []);
+    const daemon = createMockDaemon({
+      generatePlan: generatePlanFn,
+    });
+    router = buildRouter({ moltbookDaemon: daemon });
+    whatsApp.simulateMessage(makeMsg('/plan kuramoto', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent.length).toBeGreaterThanOrEqual(2);
+    });
+
+    expect(generatePlanFn).toHaveBeenCalledWith('kuramoto');
+    expect(whatsApp.sent[1].text).toContain('No engagement targets found');
+  });
+
+  it('/plan without daemon sends not-running', async () => {
+    router = buildRouter();
+    whatsApp.simulateMessage(makeMsg('/plan', USER_JID));
+
+    await vi.waitFor(() => {
+      expect(whatsApp.sent).toHaveLength(1);
+    });
+    expect(whatsApp.sent[0].text).toContain('Moltbook daemon not running');
   });
 
   // --------------------------------------------------------------------------

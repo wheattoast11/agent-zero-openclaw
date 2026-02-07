@@ -133,6 +133,7 @@ export class SmsAdapter extends EventEmitter implements ChannelAdapter {
       if (this.config.webhookUrl) {
         const signature = req.headers['x-twilio-signature'] as string | undefined;
         if (!signature || !this.validateSignature(signature, body)) {
+          console.log('[SMS] Signature validation failed — rejecting');
           res.writeHead(403);
           res.end();
           return;

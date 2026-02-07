@@ -13,7 +13,9 @@
  *   mode                         Show current daemon mode
  */
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
+dotenv.config();
 import { Vault } from '../src/security/vault.js';
 import { ApprovalGate, type QueuedResponse } from '../src/moltbook/approvalGate.js';
 

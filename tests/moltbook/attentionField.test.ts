@@ -133,6 +133,53 @@ describe('AttentionField', () => {
   });
 
   // ──────────────────────────────────────────────────────────────────────────
+  // OUTCOME TRACKING
+  // ──────────────────────────────────────────────────────────────────────────
+
+  it('recordOutcome stores outcome data', () => {
+    af.recordOutcome('thread-1', { upvotes: 5, replies: 3 });
+    const boost = af.getOutcomeBoost('thread-1');
+    expect(boost).toBeGreaterThan(0);
+  });
+
+  it('getOutcomeBoost returns positive value for good outcomes', () => {
+    af.recordOutcome('thread-1', { upvotes: 10, replies: 8 });
+    const boost = af.getOutcomeBoost('thread-1');
+    // compositeScore = min(1, (10*0.3 + 8*0.7)/10) = min(1, (3+5.6)/10) = 0.86
+    // boost = 0.86 * 0.3 = 0.258
+    expect(boost).toBeGreaterThan(0.2);
+    expect(boost).toBeLessThanOrEqual(0.3);
+  });
+
+  it('getOutcomeBoost returns 0 for unknown threads', () => {
+    // No outcomes recorded
+    const boost = af.getOutcomeBoost('unknown-thread');
+    expect(boost).toBe(0);
+  });
+
+  it('outcome boost influences thread scoring', () => {
+    const thread = makeThread({
+      title: 'Thermodynamic routing patterns',
+      replyCount: 10,
+      lastActivity: Date.now() - 60000,
+    });
+
+    // Score without outcomes
+    const scoreBefore = af.scoreThread(thread);
+
+    // Record good outcomes
+    af.recordOutcome('some-thread', { upvotes: 8, replies: 6 });
+
+    // Score after recording outcomes — boost should increase priority
+    const field2 = new AttentionField();
+    const scoreWithout = field2.scoreThread(thread);
+
+    // The field with outcome data should produce higher or equal priority
+    const scoreAfter = af.scoreThread(thread);
+    expect(scoreAfter.priority).toBeGreaterThan(scoreWithout.priority);
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
   // FACTORY
   // ──────────────────────────────────────────────────────────────────────────
 

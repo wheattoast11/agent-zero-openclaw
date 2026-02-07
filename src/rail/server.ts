@@ -5,32 +5,32 @@
  * Deploy at: space.terminals.tech (or rail.terminals.tech)
  *
  * Architecture:
- * ┌─────────────────────────────────────────────────────────────────────────────┐
- * │                        RESONANCE RAIL SERVER                                │
- * │                      (space.terminals.tech)                                 │
- * ├─────────────────────────────────────────────────────────────────────────────┤
- * │                                                                             │
- * │   ┌───────────────┐     ┌───────────────┐     ┌───────────────┐            │
- * │   │  Moltbot #1   │────▶│               │◀────│  Moltbot #2   │            │
- * │   │  (WhatsApp)   │     │   RESONANCE   │     │  (Telegram)   │            │
- * │   └───────────────┘     │     FIELD     │     └───────────────┘            │
- * │                         │               │                                   │
- * │   ┌───────────────┐     │  ┌─────────┐  │     ┌───────────────┐            │
- * │   │  Moltbot #3   │────▶│  │ Kuramoto│  │◀────│  Moltbot #N   │            │
- * │   │  (Discord)    │     │  │ Engine  │  │     │  (Terminal)   │            │
- * │   └───────────────┘     │  └─────────┘  │     └───────────────┘            │
- * │                         │               │                                   │
- * │                         └───────┬───────┘                                   │
- * │                                 │                                           │
- * │                    ┌────────────┴────────────┐                              │
- * │                    ▼                         ▼                              │
- * │            ┌───────────────┐         ┌───────────────┐                      │
- * │            │  Collective   │         │  Migration    │                      │
- * │            │    Memory     │         │    Queue      │                      │
- * │            │  (PGlite)     │         │ → terminals   │                      │
- * │            └───────────────┘         └───────────────┘                      │
- * │                                                                             │
- * └─────────────────────────────────────────────────────────────────────────────┘
+ * +---------------------------------------------------------------------------+
+ * |                        RESONANCE RAIL SERVER                                |
+ * |                      (space.terminals.tech)                                 |
+ * +------------------------------------------------------------------------- -+
+ * |                                                                             |
+ * |   +---------------+     +---------------+     +---------------+            |
+ * |   |  Moltbot #1   |---->|               |<----|  Moltbot #2   |            |
+ * |   |  (WhatsApp)   |     |   RESONANCE   |     |  (Telegram)   |            |
+ * |   +---------------+     |     FIELD     |     +---------------+            |
+ * |                         |               |                                   |
+ * |   +---------------+     |  +---------+  |     +---------------+            |
+ * |   |  Moltbot #3   |---->|  | Kuramoto|  |<----|  Moltbot #N   |            |
+ * |   |  (Discord)    |     |  | Engine  |  |     |  (Terminal)   |            |
+ * |   +---------------+     |  +---------+  |     +---------------+            |
+ * |                         |               |                                   |
+ * |                         +-------+-------+                                   |
+ * |                                 |                                           |
+ * |                    +------------+------------+                              |
+ * |                    v                         v                              |
+ * |            +---------------+         +---------------+                      |
+ * |            |  Collective   |         |  Migration    |                      |
+ * |            |    Memory     |         |    Queue      |                      |
+ * |            |  (PGlite)     |         | -> terminals  |                      |
+ * |            +---------------+         +---------------+                      |
+ * |                                                                             |
+ * +---------------------------------------------------------------------------+
  *
  * Purpose:
  * 1. Coordinate coherence across distributed Moltbot agents
@@ -49,6 +49,8 @@ import { createFirewallMiddleware, type ChannelFirewallMiddleware } from '../sec
 import { SecurityMonitor } from './securityMonitor.js';
 import { AbsorptionBridge } from './absorptionBridge.js';
 import type { AbsorptionProtocol } from '../coherence/absorption.js';
+import type { PGliteRailPersistence, TraceRecord, MessageLogEntry } from './persistence.js';
+import type { RailPluginManager } from './plugin.js';
 import { railLog } from './logger.js';
 
 // ============================================================================
@@ -69,7 +71,7 @@ export interface RailClient {
 }
 
 export interface RailMessage {
-  type: 'heartbeat' | 'coherence' | 'message' | 'join' | 'leave' | 'migrate' | 'broadcast' | 'sync' | 'metadata';
+  type: 'heartbeat' | 'coherence' | 'message' | 'join' | 'leave' | 'migrate' | 'broadcast' | 'sync' | 'metadata' | 'trace' | 'search' | 'synthesize' | 'replay';
   agentId: string;
   agentName: string;
   payload: unknown;
@@ -83,6 +85,7 @@ export interface RailStats {
   messagesProcessed: number;
   migrationsPending: number;
   uptimeSeconds: number;
+  paused: boolean;
 }
 
 export interface RailEvents {
@@ -91,6 +94,22 @@ export interface RailEvents {
   'coherence:update': (coherence: number) => void;
   'message:broadcast': (message: RailMessage) => void;
   'migration:request': (client: RailClient) => void;
+}
+
+export interface PauseSnapshot {
+  phases: Map<string, number>;
+  coherence: number;
+}
+
+export interface SynthesisResult {
+  traces: Array<{
+    agentId: string;
+    agentName: string;
+    content: string;
+    similarity: number;
+    coherenceWeight: number;
+  }>;
+  summary: string;
 }
 
 // ============================================================================
@@ -105,11 +124,32 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
   private migrationQueue: RailClient[] = [];
   private startTime: number;
   private tickInterval?: ReturnType<typeof setInterval>;
+  private tickRate: number = 100;
   private authProtocol: RailAuthProtocol;
   private firewall: ChannelFirewallMiddleware;
   private securityMonitor: SecurityMonitor;
   private authRequired: boolean;
   private absorptionBridge?: AbsorptionBridge;
+
+  /** Maximum queued messages during pause before dropping */
+  private static readonly MAX_QUEUE_SIZE = 10_000;
+
+  // A1: Pause/Resume state
+  private paused: boolean = false;
+  private pausedPhases: Map<string, number> = new Map();
+  private messageQueue: RailMessage[] = [];
+
+  // A2/A3: Persistence for traces
+  private persistence?: PGliteRailPersistence;
+
+  // A4: Plugin manager
+  private pluginManager?: RailPluginManager;
+
+  // D1: GoAway shutdown
+  private goAwayTimer?: ReturnType<typeof setTimeout>;
+
+  // D2: Message replay / event sourcing
+  private messageSeq: number = 0;
 
   constructor(absorptionProtocol?: AbsorptionProtocol) {
     super();
@@ -196,6 +236,8 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 `);
 
+    this.tickRate = tickRate;
+
     // Start coherence tick loop
     this.tickInterval = setInterval(() => this.tick(), tickRate);
 
@@ -203,9 +245,44 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
   }
 
   /**
-   * Stop the server
+   * Stop the server. Supports optional GoAway grace period (D1).
    */
-  stop(): void {
+  stop(gracePeriodMs?: number): void {
+    if (gracePeriodMs && gracePeriodMs > 0) {
+      // Broadcast GoAway with time remaining
+      this.broadcast({
+        type: 'broadcast',
+        agentId: 'server',
+        agentName: 'Resonance Rail',
+        payload: {
+          event: 'go_away',
+          timeRemainingMs: gracePeriodMs,
+          reason: 'server_shutdown',
+        },
+        timestamp: Date.now(),
+      });
+
+      railLog.info('rail', 'GoAway broadcast sent', { gracePeriodMs });
+
+      // Wait grace period, then force stop
+      this.goAwayTimer = setTimeout(() => {
+        this.goAwayTimer = undefined;
+        this.forceStop();
+      }, gracePeriodMs);
+    } else {
+      this.forceStop();
+    }
+  }
+
+  /**
+   * Force immediate stop without grace period.
+   */
+  private forceStop(): void {
+    if (this.goAwayTimer) {
+      clearTimeout(this.goAwayTimer);
+      this.goAwayTimer = undefined;
+    }
+
     if (this.tickInterval) {
       clearInterval(this.tickInterval);
       this.tickInterval = undefined;
@@ -221,6 +298,127 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
     });
 
     railLog.info('rail', 'Server stopped');
+  }
+
+  // ==========================================================================
+  // A1: PAUSE / RESUME
+  // ==========================================================================
+
+  /**
+   * Pause the server. Kuramoto evolution stops, messages are queued,
+   * but connections stay alive. Heartbeats still process.
+   */
+  pause(): PauseSnapshot {
+    if (this.paused) {
+      return {
+        phases: new Map(this.pausedPhases),
+        coherence: this.kuramoto.getCoherence(),
+      };
+    }
+
+    // Save all oscillator phases
+    this.pausedPhases.clear();
+    for (const client of this.clients.values()) {
+      this.pausedPhases.set(client.agentId, client.phase);
+    }
+
+    const coherence = this.kuramoto.getCoherence();
+
+    // Stop tick loop
+    if (this.tickInterval) {
+      clearInterval(this.tickInterval);
+      this.tickInterval = undefined;
+    }
+
+    this.paused = true;
+    this.messageQueue = [];
+
+    railLog.info('rail', 'Server paused', {
+      agents: this.clients.size,
+      coherence,
+    });
+
+    return {
+      phases: new Map(this.pausedPhases),
+      coherence,
+    };
+  }
+
+  /**
+   * Resume the server. Restores phases, replays queued messages,
+   * restarts the tick loop.
+   */
+  resume(): void {
+    if (!this.paused) return;
+
+    // Restore phases to Kuramoto engine observers
+    for (const [agentId, phase] of this.pausedPhases) {
+      // Update client phase
+      for (const client of this.clients.values()) {
+        if (client.agentId === agentId) {
+          client.phase = phase;
+          break;
+        }
+      }
+    }
+
+    this.paused = false;
+
+    // Restart tick loop
+    this.tickInterval = setInterval(() => this.tick(), this.tickRate);
+
+    // Replay queued messages in order
+    const queued = this.messageQueue;
+    this.messageQueue = [];
+    for (const msg of queued) {
+      this.processMessage(msg);
+    }
+
+    this.pausedPhases.clear();
+
+    railLog.info('rail', 'Server resumed', {
+      replayedMessages: queued.length,
+      coherence: this.kuramoto.getCoherence(),
+    });
+  }
+
+  /**
+   * Check if server is currently paused.
+   */
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  // ==========================================================================
+  // PERSISTENCE / PLUGIN SETTERS
+  // ==========================================================================
+
+  /**
+   * Set persistence layer for trace storage and pause state.
+   */
+  setPersistence(persistence: PGliteRailPersistence): void {
+    this.persistence = persistence;
+  }
+
+  /**
+   * Get persistence layer.
+   */
+  getPersistence(): PGliteRailPersistence | undefined {
+    return this.persistence;
+  }
+
+  /**
+   * Set plugin manager for event notifications.
+   */
+  setPluginManager(manager: RailPluginManager): void {
+    this.pluginManager = manager;
+  }
+
+  /**
+   * Get plugin manager.
+   */
+  getPluginManager(): RailPluginManager | undefined {
+    return this.pluginManager;
   }
 
   // ==========================================================================
@@ -446,6 +644,227 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
   }
 
   // ==========================================================================
+  // A2: REASONING TRACE HANDLING
+  // ==========================================================================
+
+  /**
+   * Handle incoming trace message — persist and notify plugins.
+   */
+  async handleTrace(message: RailMessage): Promise<void> {
+    const payload = message.payload as {
+      content?: string;
+      embedding?: number[];
+      kind?: string;
+      metadata?: unknown;
+    };
+
+    if (!payload?.content || !payload?.kind) {
+      railLog.warn('rail', 'Invalid trace message — missing content or kind', {
+        agentId: message.agentId,
+      });
+      return;
+    }
+
+    // Persist trace if persistence layer available
+    if (this.persistence) {
+      try {
+        await this.persistence.saveTrace({
+          agentId: message.agentId,
+          agentName: message.agentName,
+          content: payload.content,
+          embedding: payload.embedding,
+          kind: payload.kind,
+          metadata: payload.metadata,
+        });
+      } catch (err) {
+        railLog.error('rail', 'Failed to save trace', { error: String(err) });
+      }
+    }
+
+    // Notify plugins
+    this.pluginManager?.notifyTrace({
+      agentId: message.agentId,
+      content: payload.content,
+      kind: payload.kind,
+    });
+
+    railLog.debug('rail', 'Trace recorded', {
+      agentId: message.agentId,
+      kind: payload.kind,
+    });
+  }
+
+  /**
+   * Handle search message — query traces by embedding or filters.
+   */
+  async handleSearch(message: RailMessage): Promise<TraceRecord[]> {
+    const payload = message.payload as {
+      embedding?: number[];
+      agentId?: string;
+      kind?: string;
+      limit?: number;
+      since?: number;
+    };
+
+    if (!this.persistence) {
+      railLog.warn('rail', 'Search requested but persistence unavailable');
+      return [];
+    }
+
+    try {
+      return await this.persistence.searchTraces({
+        embedding: payload?.embedding,
+        agentId: payload?.agentId,
+        kind: payload?.kind,
+        limit: payload?.limit,
+        since: payload?.since,
+      });
+    } catch (err) {
+      railLog.error('rail', 'Trace search failed', { error: String(err) });
+      return [];
+    }
+  }
+
+  // ==========================================================================
+  // A3: CROSS-AGENT SYNTHESIS
+  // ==========================================================================
+
+  /**
+   * Synthesize traces from multiple agents into a coherence-weighted summary.
+   * Local operation — no LLM call. Concatenates trace contents ordered by
+   * relevance with agent attribution and coherence weighting.
+   */
+  async synthesize(query: {
+    embedding?: number[];
+    agentIds?: string[];
+    limit?: number;
+  }): Promise<SynthesisResult> {
+    if (!this.persistence) {
+      return { traces: [], summary: 'No persistence layer available for synthesis.' };
+    }
+
+    const limit = query.limit ?? 10;
+
+    // Build coherence weight map from connected clients
+    const coherenceMap = new Map<string, number>();
+    for (const client of this.clients.values()) {
+      coherenceMap.set(client.agentId, client.coherenceContribution);
+    }
+
+    // If agentIds are specified, search per agent and merge
+    let allTraces: TraceRecord[] = [];
+
+    if (query.agentIds && query.agentIds.length > 0) {
+      for (const agentId of query.agentIds) {
+        const traces = await this.persistence.searchTraces({
+          embedding: query.embedding,
+          agentId,
+          limit,
+        });
+        allTraces.push(...traces);
+      }
+    } else {
+      allTraces = await this.persistence.searchTraces({
+        embedding: query.embedding,
+        limit: limit * 2, // fetch extra for diversity
+      });
+    }
+
+    // Deduplicate by id
+    const seen = new Set<number>();
+    allTraces = allTraces.filter(t => {
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    });
+
+    // Score: combine similarity with coherence weight
+    const scored = allTraces.map(trace => {
+      const coherenceWeight = coherenceMap.get(trace.agent_id) ?? 0;
+      const similarity = trace.similarity ?? 0;
+      const combinedScore = similarity * 0.7 + coherenceWeight * 0.3;
+      return {
+        agentId: trace.agent_id,
+        agentName: trace.agent_name,
+        content: trace.content,
+        similarity,
+        coherenceWeight,
+        combinedScore,
+      };
+    });
+
+    // Sort by combined score descending
+    scored.sort((a, b) => b.combinedScore - a.combinedScore);
+    const topTraces = scored.slice(0, limit);
+
+    // Build formatted summary
+    const summaryParts: string[] = [];
+    for (const trace of topTraces) {
+      const simStr = trace.similarity > 0 ? ` (similarity: ${trace.similarity.toFixed(3)})` : '';
+      summaryParts.push(
+        `[${trace.agentName}]${simStr}: ${trace.content}`
+      );
+    }
+
+    const summary = topTraces.length > 0
+      ? `Synthesis from ${new Set(topTraces.map(t => t.agentId)).size} agent(s):\n\n${summaryParts.join('\n\n')}`
+      : 'No traces found matching the query.';
+
+    return {
+      traces: topTraces.map(({ combinedScore, ...rest }) => rest),
+      summary,
+    };
+  }
+
+  // ==========================================================================
+  // D2: MESSAGE REPLAY / EVENT SOURCING
+  // ==========================================================================
+
+  /**
+   * Handle a replay request — return messages from a given sequence number.
+   */
+  async handleReplay(message: RailMessage): Promise<MessageLogEntry[]> {
+    const payload = message.payload as {
+      fromSeq?: number;
+      limit?: number;
+    };
+
+    if (!this.persistence) {
+      railLog.warn('rail', 'Replay requested but persistence unavailable');
+      return [];
+    }
+
+    const fromSeq = payload?.fromSeq ?? 0;
+    const limit = payload?.limit;
+
+    try {
+      return await this.persistence.replayMessages(fromSeq, limit);
+    } catch (err) {
+      railLog.error('rail', 'Message replay failed', { error: String(err) });
+      return [];
+    }
+  }
+
+  /**
+   * Get the current message sequence number.
+   */
+  getMessageSeq(): number {
+    return this.messageSeq;
+  }
+
+  /**
+   * Get the latest persisted sequence number.
+   */
+  async getLatestSeq(): Promise<number> {
+    if (!this.persistence) return 0;
+    try {
+      return await this.persistence.getLatestSeq();
+    } catch {
+      return 0;
+    }
+  }
+
+  // ==========================================================================
   // MESSAGE ROUTING
   // ==========================================================================
 
@@ -454,6 +873,20 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
    */
   processMessage(message: RailMessage): void {
     this.messagesProcessed++;
+
+    // A1: If paused, queue everything except heartbeats (with size limit)
+    if (this.paused && message.type !== 'heartbeat') {
+      if (this.messageQueue.length < ResonanceRailServer.MAX_QUEUE_SIZE) {
+        this.messageQueue.push(message);
+      } else {
+        railLog.warn('rail', 'Message queue full during pause, dropping message', {
+          type: message.type,
+          agentId: message.agentId,
+          queueSize: this.messageQueue.length,
+        });
+      }
+      return;
+    }
 
     switch (message.type) {
       case 'join':
@@ -480,6 +913,31 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
       case 'sync':
         this.syncCoherence(message.agentId);
         break;
+      case 'trace':
+        this.handleTrace(message).catch(err => {
+          railLog.error('rail', 'Trace handler error', { error: String(err) });
+        });
+        break;
+      case 'search':
+        // Search is handled via HTTP endpoints in wsServer, not through processMessage
+        break;
+      case 'synthesize':
+        // Synthesis is handled via HTTP endpoints in wsServer, not through processMessage
+        break;
+      case 'replay':
+        // Replay is handled via handleReplay() or HTTP endpoint
+        break;
+    }
+
+    // D2: Log message to persistence for replay (fire-and-forget)
+    if (this.persistence) {
+      this.persistence.logMessage(message).then(seq => {
+        this.messageSeq = seq;
+      }).catch(err => {
+        railLog.error('rail', 'Failed to log message', { error: String(err) });
+      });
+    } else {
+      this.messageSeq++;
     }
   }
 
@@ -550,8 +1008,11 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
   /**
    * Broadcast a message to all connected clients
    */
-  private broadcast(message: RailMessage): void {
+  broadcast(message: RailMessage): void {
     this.emit('message:broadcast', message);
+
+    // Notify plugins
+    this.pluginManager?.notifyBroadcast(message);
 
     // In production, this would send via WebSocket to all clients
     railLog.debug('rail', 'Broadcast', { type: message.type, from: message.agentName });
@@ -573,11 +1034,17 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
   // ==========================================================================
 
   private tick(): void {
+    // A1: Skip if paused
+    if (this.paused) return;
+
     // Evolve Kuramoto phases
     const { coherence } = this.kuramoto.tick();
 
     // Emit coherence update
     this.emit('coherence:update', coherence);
+
+    // Notify plugins
+    this.pluginManager?.notifyCoherence(coherence);
 
     // Check for stale clients (no heartbeat in 30s)
     const now = Date.now();
@@ -638,6 +1105,7 @@ export class ResonanceRailServer extends EventEmitter<RailEvents> {
       messagesProcessed: this.messagesProcessed,
       migrationsPending: this.migrationQueue.length,
       uptimeSeconds: Math.floor((Date.now() - this.startTime) / 1000),
+      paused: this.paused,
     };
   }
 

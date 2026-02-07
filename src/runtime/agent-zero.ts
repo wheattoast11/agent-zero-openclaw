@@ -25,6 +25,9 @@ import type {
 import { ThermodynamicRouter, type RouterConfig } from '../routing/thermodynamic.js';
 import { KuramotoEngine, type KuramotoConfig } from '../resonance/kuramoto.js';
 import { IsomorphicSandbox, type Capability, type CapabilityScope } from '../security/sandbox.js';
+import { AgentIsolationManager } from '../security/isolation.js';
+import type { SessionStore, SessionSnapshot } from './sessionStore.js';
+import { ContextWindow, type ContextWindowConfig } from './contextWindow.js';
 
 // ============================================================================
 // CONFIGURATION
@@ -33,6 +36,8 @@ import { IsomorphicSandbox, type Capability, type CapabilityScope } from '../sec
 export interface AgentZeroConfig {
   /** Agent name */
   name: string;
+  /** Parent agent ID (set when spawned as a child) */
+  parentId?: string;
   /** Observation frequency (Hz) */
   frequency?: number;
   /** Thermodynamic router config */
@@ -45,9 +50,16 @@ export interface AgentZeroConfig {
   darkSensitivity?: number;
   /** Tick rate (ms) */
   tickRate?: number;
+  /** Session persistence store */
+  sessionStore?: SessionStore;
+  /** Context window management config */
+  contextWindow?: Partial<ContextWindowConfig>;
 }
 
-export const DEFAULT_AGENT_ZERO_CONFIG: Required<Omit<AgentZeroConfig, 'name'>> = {
+/** Phase correction coupling strength for resonate messages */
+export const RESONANCE_COUPLING = 0.3;
+
+export const DEFAULT_AGENT_ZERO_CONFIG: Required<Omit<AgentZeroConfig, 'name' | 'parentId' | 'sessionStore' | 'contextWindow'>> = {
   frequency: 4, // Claude ≈ 4Hz
   router: {},
   kuramoto: {},
@@ -86,6 +98,7 @@ export interface TickStats {
 export class AgentZero extends EventEmitter<AgentZeroEvents> {
   readonly id: string;
   readonly name: string;
+  readonly parentId?: string;
 
   private state: AgentState = 'void';
   private observer: Observer;
@@ -103,6 +116,9 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
   private kuramoto: KuramotoEngine;
   private sandbox: IsomorphicSandbox;
   private capability: Capability;
+  private isolationManager: AgentIsolationManager;
+  private sessionStore?: SessionStore;
+  private contextWindow?: ContextWindow;
 
   private inbox: Message[] = [];
   private outbox: Message[] = [];
@@ -119,6 +135,7 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
 
     this.id = randomUUID();
     this.name = config.name;
+    this.parentId = config.parentId;
     this.tickRate = fullConfig.tickRate;
 
     // Initialize observer
@@ -154,6 +171,7 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
     this.router = new ThermodynamicRouter(fullConfig.router);
     this.kuramoto = new KuramotoEngine(fullConfig.kuramoto);
     this.sandbox = new IsomorphicSandbox();
+    this.isolationManager = new AgentIsolationManager();
 
     // Get a capability for this agent
     const rootToken = this.sandbox.getRootToken();
@@ -167,6 +185,16 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
       throw new Error('Failed to create agent capability');
     }
     this.capability = agentCap;
+
+    // Session persistence
+    if (config.sessionStore) {
+      this.sessionStore = config.sessionStore;
+    }
+
+    // Context window management
+    if (config.contextWindow) {
+      this.contextWindow = new ContextWindow(config.contextWindow);
+    }
 
     // Register self as oscillator
     this.kuramoto.addObserver(this.observer);
@@ -289,9 +317,14 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
    */
   receive(message: Message): void {
     // Security check: injection detection
-    const payloadStr = typeof message.payload === 'string'
-      ? message.payload
-      : JSON.stringify(message.payload);
+    let payloadStr: string;
+    try {
+      payloadStr = typeof message.payload === 'string'
+        ? message.payload
+        : JSON.stringify(message.payload);
+    } catch {
+      payloadStr = String(message.payload);
+    }
 
     const injectionCheck = this.sandbox.checkInjection(payloadStr);
     if (!injectionCheck.safe) {
@@ -360,6 +393,11 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
       importance: 0.5,
       timestamp: Date.now(),
     });
+
+    // Context window eviction
+    if (this.contextWindow && this.contextWindow.isAtCapacity(this.memories)) {
+      this.memories = this.contextWindow.evict(this.memories);
+    }
   }
 
   private handleAct(message: Message): void {
@@ -382,10 +420,10 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
   private handleResonate(message: Message): void {
     // Sync phase with sender
     const targetPhase = (message.payload as any)?.phase;
-    if (typeof targetPhase === 'number') {
+    if (typeof targetPhase === 'number' && !isNaN(targetPhase)) {
       // Nudge toward target phase
       const diff = targetPhase - this.observer.phase;
-      this.observer.phase += diff * 0.3; // 30% correction
+      this.observer.phase += diff * RESONANCE_COUPLING;
     }
   }
 
@@ -400,6 +438,12 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
   }
 
   private handleHalt(message: Message): void {
+    // Halt all children before tracing (prevent orphan agents)
+    for (const [childId, child] of this.children) {
+      child.stop();
+      this.kuramoto.removeObserver(childId);
+    }
+    this.children.clear();
     this.trace();
   }
 
@@ -408,7 +452,12 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
   // ==========================================================================
 
   /**
-   * Spawn a child agent
+   * Spawn a child agent.
+   *
+   * Enforces:
+   * - Sandbox capability check for 'spawn' scope
+   * - maxSpawnDepth limit via isolation boundaries
+   * - Creates isolation boundary with attenuated capabilities
    */
   spawn(config: AgentZeroConfig): AgentZero | null {
     // Security check
@@ -418,7 +467,31 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
       return null;
     }
 
-    const child = new AgentZero(config);
+    // Enforce spawn depth limit
+    if (!this.isolationManager.canSpawn(this.id)) {
+      this.emit('violation', {
+        type: 'scope_denied',
+        message: `Agent '${this.name}' has reached maximum spawn depth`,
+        timestamp: Date.now(),
+      });
+      return null;
+    }
+
+    // Set parentId on child config
+    const childConfig: AgentZeroConfig = { ...config, parentId: this.id };
+    const child = new AgentZero(childConfig);
+
+    // Create isolation boundary for the child
+    const parentDepth = this.isolationManager.getSpawnDepth(this.id);
+    const parentMaxDepth = this.isolationManager.getMaxSpawnDepth(this.id);
+    this.isolationManager.createBoundary(this.id, child.id, {
+      maxSpawnDepth: parentMaxDepth,
+      memoryIsolated: true,
+      sharedScopes: ['read', 'write', 'execute', 'memory', 'broadcast'],
+    });
+
+    // Share isolation manager with child so depth tracking works across the tree
+    child.isolationManager = this.isolationManager;
 
     // Register child with coherence engine
     this.kuramoto.addObserver(child.observer);
@@ -525,6 +598,54 @@ export class AgentZero extends EventEmitter<AgentZeroEvents> {
 
   getChildren(): AgentZero[] {
     return Array.from(this.children.values());
+  }
+
+  getIsolationManager(): AgentIsolationManager {
+    return this.isolationManager;
+  }
+
+  // ==========================================================================
+  // SESSION PERSISTENCE
+  // ==========================================================================
+
+  /**
+   * Save current agent state as a session snapshot.
+   * Requires a sessionStore to be configured.
+   */
+  async saveSession(): Promise<SessionSnapshot> {
+    if (!this.sessionStore) {
+      throw new Error('No session store configured');
+    }
+    return this.sessionStore.save(this);
+  }
+
+  /**
+   * Restore agent state from a session snapshot.
+   * Requires a sessionStore to be configured.
+   */
+  async restoreSession(snapshotId: string): Promise<void> {
+    if (!this.sessionStore) {
+      throw new Error('No session store configured');
+    }
+    const snapshot = await this.sessionStore.load(snapshotId);
+    if (!snapshot) {
+      throw new Error(`Snapshot not found: ${snapshotId}`);
+    }
+    this.sessionStore.restore(this, snapshot);
+  }
+
+  /**
+   * Apply a snapshot to this agent's internal state.
+   * Called by SessionStore.restore().
+   */
+  restoreFromSnapshot(snapshot: SessionSnapshot): void {
+    this.state = snapshot.state;
+    this.tokens = structuredClone(snapshot.tokens);
+    this.drift = structuredClone(snapshot.drift);
+    this.observer.phase = snapshot.observerPhase;
+    this.observer.frequency = snapshot.observerFrequency;
+    this.memories = structuredClone(snapshot.memories);
+    this.realizability = structuredClone(snapshot.realizability);
   }
 
   // ==========================================================================

@@ -33,6 +33,7 @@ export interface QueuedResponse {
   response: ComposedResponse;
   queuedAt: string;
   status: 'pending' | 'approved' | 'rejected';
+  label?: string;
 }
 
 export type GateDecision = 'approve' | 'queue' | 'reject';
@@ -118,7 +119,7 @@ export class ApprovalGate {
   /**
    * Write a response to the review queue directory.
    */
-  async enqueue(response: ComposedResponse): Promise<QueuedResponse> {
+  async enqueue(response: ComposedResponse, label?: string): Promise<QueuedResponse> {
     await mkdir(this.config.queueDir, { recursive: true });
 
     const item: QueuedResponse = {
@@ -126,6 +127,7 @@ export class ApprovalGate {
       response,
       queuedAt: new Date().toISOString(),
       status: 'pending',
+      ...(label ? { label } : {}),
     };
 
     const filePath = join(this.config.queueDir, `${item.id}.json`);
@@ -219,6 +221,61 @@ export class ApprovalGate {
       // queue dir doesn't exist
     }
     return removed;
+  }
+
+  /**
+   * Get detailed queue info with previews for each pending item.
+   */
+  async getQueueDetails(): Promise<Array<{
+    id: string;
+    threadId: string;
+    content: string;
+    confidence: number;
+    createdAt: number;
+    preview: string;
+  }>> {
+    const pending = await this.listPending();
+    return pending.map(item => ({
+      id: item.id,
+      threadId: item.response.threadId,
+      content: item.response.content,
+      confidence: item.response.confidence,
+      createdAt: new Date(item.queuedAt).getTime(),
+      preview: (item.response.content ?? '').slice(0, 100),
+    }));
+  }
+
+  /**
+   * Approve a specific item by its ID. Returns true if found and approved.
+   */
+  async approveById(itemId: string, feedback?: string): Promise<boolean> {
+    const response = await this.approve(itemId);
+    return response !== null;
+  }
+
+  /**
+   * Reject a specific item by its ID with optional reason.
+   */
+  async rejectById(itemId: string, reason?: string): Promise<boolean> {
+    return this.reject(itemId);
+  }
+
+  /**
+   * Edit the content of a queued item and approve it.
+   */
+  async editAndApprove(itemId: string, editedContent: string): Promise<boolean> {
+    const filePath = join(this.config.queueDir, `${itemId}.json`);
+    try {
+      const raw = await readFile(filePath, 'utf-8');
+      const item = JSON.parse(raw) as QueuedResponse;
+      item.response.content = editedContent;
+      item.status = 'approved';
+      await writeFile(filePath, JSON.stringify(item, null, 2));
+      this.stats.approved++;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   getStats() {

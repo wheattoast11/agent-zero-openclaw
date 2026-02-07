@@ -110,3 +110,78 @@ describe('ThermodynamicRouter', () => {
     expect(router.getTemperature()).toBeLessThan(t0);
   });
 });
+
+describe('Model-aware routing', () => {
+  it('model affinity reduces energy (higher probability for matching model)', () => {
+    const embedding = new Array(768).fill(0).map((_, i) => (i % 3 === 0 ? 1 : 0));
+    const attractor = new Array(768).fill(0).map(() => 0.5); // neutral attractor
+    const obs = makeObserver(uuid());
+
+    const config = {
+      temperature: 1.0,
+      loadWeight: 0.2,
+      coherenceWeight: 0.2,
+      semanticWeight: 0.3,
+      modelWeight: 0.3,
+      annealingSchedule: 'none' as const,
+    };
+
+    // With model embedding matching the message
+    const energyWithModel = computeEnergy(
+      embedding, obs, 0, 0.5, attractor, config, embedding
+    );
+
+    // Without model embedding
+    const energyWithout = computeEnergy(
+      embedding, obs, 0, 0.5, attractor, config
+    );
+
+    // Model affinity should reduce energy
+    expect(energyWithModel).toBeLessThan(energyWithout);
+  });
+
+  it('backward compatible without modelEmbedding', () => {
+    const router = new ThermodynamicRouter({
+      temperature: 1.0,
+      annealingSchedule: 'none',
+      modelWeight: 0.3,
+    });
+    const obs = makeObserver(uuid());
+    const attractor = new Array(768).fill(0).map((_, i) => (i < 384 ? 1 : 0));
+    const msg = makeMessage(attractor);
+
+    // Should work without modelEmbedding (no crash)
+    const result = router.route(msg, [{
+      observer: obs,
+      load: 0,
+      coherence: 1.0,
+      attractor,
+    }]);
+    expect(result.id).toBe(obs.id);
+  });
+
+  it('modelWeight=0 disables model affinity', () => {
+    const embedding = new Array(768).fill(0).map((_, i) => (i % 2 === 0 ? 1 : 0));
+    const attractor = new Array(768).fill(0).map(() => 0.5);
+    const obs = makeObserver(uuid());
+
+    const config = {
+      temperature: 1.0,
+      loadWeight: 0.2,
+      coherenceWeight: 0.2,
+      semanticWeight: 0.3,
+      modelWeight: 0,
+      annealingSchedule: 'none' as const,
+    };
+
+    const energyWithModel = computeEnergy(
+      embedding, obs, 0, 0.5, attractor, config, embedding
+    );
+    const energyWithout = computeEnergy(
+      embedding, obs, 0, 0.5, attractor, config
+    );
+
+    // With modelWeight=0, model embedding should have no effect
+    expect(energyWithModel).toBeCloseTo(energyWithout, 10);
+  });
+});
