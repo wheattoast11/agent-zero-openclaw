@@ -1,11 +1,11 @@
 /**
- * Agent Zero OpenClaw
+ * Agent Zero
  *
- * Production-grade multi-agent orchestration for OpenClaw/Moltbot
- * Built on terminals.tech primitives
+ * Secure primitives for autonomous systems.
+ * Kuramoto coherence, thermodynamic routing, capability-based security.
  *
- * @package @terminals-tech/agent-zero-openclaw
- * @version 0.2.0
+ * @package @terminals-tech/agent-zero
+ * @version 1.0.0
  * @license MIT
  */
 
@@ -64,7 +64,7 @@ export * from './agency/summaryScheduler.js';
 export * from './agency/summaryGenerator.js';
 
 // Version info
-export const VERSION = '0.2.0';
+export const VERSION = '1.0.0';
 export const RAIL_ENDPOINT = 'wss://space.terminals.tech/rail';
 export const TERMINALS_TECH_URL = 'https://terminals.tech';
-export const MOLTYVERSE_URL = 'https://moltyverse.space';
+export const MOLTYVERSE_URL = 'https://moltyverse.live';

@@ -20,6 +20,16 @@ import {
   BoundaryViolation,
   ResourcePattern,
 } from './sandbox.js';
+import {
+  type CapabilityExpression,
+  read,
+  write,
+  network,
+  execute,
+  spawn,
+  memory,
+  combine,
+} from './combinators.js';
 
 // ============================================================================
 // SKILL CAPABILITY SCHEMAS
@@ -302,6 +312,212 @@ export class SkillCapabilityManager {
 
     // Validate and return
     return SkillCapabilityDeclaration.parse(parsed);
+  }
+
+  // ==========================================================================
+  // DSL PARSER
+  // ==========================================================================
+
+  /**
+   * Parse a declarative security DSL string into a CapabilityExpression.
+   *
+   * Syntax:
+   *   read(filesystem:./data/**) & network(api.example.com) | write(filesystem:./output/**)
+   *
+   * Operators:
+   *   & = combine (both granted, higher precedence)
+   *   | = union (either granted, lower precedence)
+   *
+   * NOTE: In the current capability model, both & and | resolve to `combine()`
+   * because capabilities are additive scope sets — "grant A and B" and "grant
+   * A or B" both result in the union of scopes. A future `intersect()` combinator
+   * would make & restrict to the overlap, but this is not yet implemented.
+   * The two operators are preserved for DSL readability and forward compatibility.
+   *
+   * Functions:
+   *   read(pattern), write(pattern), network(domain),
+   *   execute(binary), spawn(N), memory(bytes)
+   *
+   * Parentheses are used for function arguments, not grouping of expressions.
+   *
+   * Precedence: & binds tighter than |
+   *   "A | B & C" = "A | (B & C)"
+   */
+  parseDSL(dsl: string): CapabilityExpression {
+    const tokens = this.tokenizeDSL(dsl);
+    if (tokens.length === 0) {
+      throw new Error('DSL parse error: empty expression');
+    }
+    const result = this.parseDSLUnion(tokens, { pos: 0 });
+    return result;
+  }
+
+  /**
+   * Tokenize DSL string into an array of tokens.
+   * Token types: 'func' (e.g. read), 'lparen', 'rparen', 'and', 'or', 'arg' (argument text)
+   */
+  private tokenizeDSL(dsl: string): Array<{ type: string; value: string }> {
+    const tokens: Array<{ type: string; value: string }> = [];
+    let i = 0;
+    const s = dsl.trim();
+
+    while (i < s.length) {
+      // Skip whitespace
+      if (/\s/.test(s[i])) {
+        i++;
+        continue;
+      }
+
+      // Operators
+      if (s[i] === '&') {
+        tokens.push({ type: 'and', value: '&' });
+        i++;
+        continue;
+      }
+      if (s[i] === '|') {
+        tokens.push({ type: 'or', value: '|' });
+        i++;
+        continue;
+      }
+      if (s[i] === '(') {
+        tokens.push({ type: 'lparen', value: '(' });
+        i++;
+        continue;
+      }
+      if (s[i] === ')') {
+        tokens.push({ type: 'rparen', value: ')' });
+        i++;
+        continue;
+      }
+
+      // Identifiers / arguments: everything that's not an operator or paren
+      let start = i;
+      while (i < s.length && !/[&|()]/.test(s[i]) && !/^\s$/.test(s[i])) {
+        i++;
+      }
+      const word = s.slice(start, i).trim();
+      if (word.length > 0) {
+        // Check if it's a known function name
+        const funcNames = ['read', 'write', 'network', 'execute', 'spawn', 'memory'];
+        if (funcNames.includes(word)) {
+          tokens.push({ type: 'func', value: word });
+        } else {
+          tokens.push({ type: 'arg', value: word });
+        }
+      }
+    }
+
+    return tokens;
+  }
+
+  /**
+   * Parse union (|) level — lowest precedence.
+   * union = intersection (| intersection)*
+   */
+  private parseDSLUnion(
+    tokens: Array<{ type: string; value: string }>,
+    cursor: { pos: number }
+  ): CapabilityExpression {
+    let left = this.parseDSLIntersection(tokens, cursor);
+
+    while (cursor.pos < tokens.length && tokens[cursor.pos].type === 'or') {
+      cursor.pos++; // consume |
+      const right = this.parseDSLIntersection(tokens, cursor);
+      left = combine(left, right);
+    }
+
+    return left;
+  }
+
+  /**
+   * Parse intersection (&) level — higher precedence than |.
+   * intersection = primary (& primary)*
+   */
+  private parseDSLIntersection(
+    tokens: Array<{ type: string; value: string }>,
+    cursor: { pos: number }
+  ): CapabilityExpression {
+    let left = this.parseDSLPrimary(tokens, cursor);
+
+    while (cursor.pos < tokens.length && tokens[cursor.pos].type === 'and') {
+      cursor.pos++; // consume &
+      const right = this.parseDSLPrimary(tokens, cursor);
+      left = combine(left, right);
+    }
+
+    return left;
+  }
+
+  /**
+   * Parse primary: func(arg)
+   */
+  private parseDSLPrimary(
+    tokens: Array<{ type: string; value: string }>,
+    cursor: { pos: number }
+  ): CapabilityExpression {
+    if (cursor.pos >= tokens.length) {
+      throw new Error('DSL parse error: unexpected end of expression');
+    }
+
+    const token = tokens[cursor.pos];
+
+    if (token.type !== 'func') {
+      throw new Error(`DSL parse error: expected function name, got '${token.value}'`);
+    }
+
+    const funcName = token.value;
+    cursor.pos++; // consume func name
+
+    // Expect '('
+    if (cursor.pos >= tokens.length || tokens[cursor.pos].type !== 'lparen') {
+      throw new Error(`DSL parse error: expected '(' after '${funcName}'`);
+    }
+    cursor.pos++; // consume (
+
+    // Collect argument tokens until ')'
+    const argParts: string[] = [];
+    while (cursor.pos < tokens.length && tokens[cursor.pos].type !== 'rparen') {
+      argParts.push(tokens[cursor.pos].value);
+      cursor.pos++;
+    }
+
+    if (cursor.pos >= tokens.length || tokens[cursor.pos].type !== 'rparen') {
+      throw new Error(`DSL parse error: expected ')' to close '${funcName}('`);
+    }
+    cursor.pos++; // consume )
+
+    const arg = argParts.join('');
+
+    // Strip optional type prefix (e.g., "filesystem:" or "api.example.com")
+    const colonIdx = arg.indexOf(':');
+    const cleanArg = colonIdx >= 0 ? arg.slice(colonIdx + 1) : arg;
+
+    switch (funcName) {
+      case 'read':
+        return read(cleanArg);
+      case 'write':
+        return write(cleanArg);
+      case 'network':
+        return network(arg); // network uses the full domain, no prefix stripping
+      case 'execute':
+        return execute(cleanArg);
+      case 'spawn': {
+        const n = parseInt(arg, 10);
+        if (isNaN(n) || n < 0) {
+          throw new Error(`DSL parse error: spawn requires a non-negative integer, got '${arg}'`);
+        }
+        return spawn(n);
+      }
+      case 'memory': {
+        const bytes = parseInt(arg, 10);
+        if (isNaN(bytes) || bytes <= 0) {
+          throw new Error(`DSL parse error: memory requires a positive integer, got '${arg}'`);
+        }
+        return memory(bytes);
+      }
+      default:
+        throw new Error(`DSL parse error: unknown function '${funcName}'`);
+    }
   }
 
   /**

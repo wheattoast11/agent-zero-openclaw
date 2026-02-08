@@ -137,6 +137,25 @@ export function hashCapabilityToken(token: string): string {
 }
 
 // ============================================================================
+// AUDIT LOG
+// ============================================================================
+
+export interface AuditEntry {
+  /** Timestamp of the check */
+  timestamp: number;
+  /** Truncated capability token */
+  token: string;
+  /** Scope that was checked */
+  scope: CapabilityScope;
+  /** Resource that was checked */
+  resource: string;
+  /** Result of the check */
+  result: 'allowed' | 'denied';
+  /** Reason for denial (if denied) */
+  reason?: string;
+}
+
+// ============================================================================
 // SANDBOX CLASS
 // ============================================================================
 
@@ -144,6 +163,8 @@ export class IsomorphicSandbox {
   private capabilities: Map<string, Capability> = new Map();
   private violations: BoundaryViolation[] = [];
   private rootCapability: Capability;
+  private auditLog: AuditEntry[] = [];
+  private auditEnabled: boolean = false;
 
   constructor() {
     // Create root capability with all permissions
@@ -175,6 +196,41 @@ export class IsomorphicSandbox {
    */
   getRootToken(): string {
     return this.rootCapability.token;
+  }
+
+  // ==========================================================================
+  // AUDIT CONTROL
+  // ==========================================================================
+
+  /**
+   * Enable audit logging of all capability checks.
+   */
+  enableAudit(): void {
+    this.auditEnabled = true;
+  }
+
+  /**
+   * Disable audit logging (default state). Stops recording new entries.
+   */
+  disableAudit(): void {
+    this.auditEnabled = false;
+  }
+
+  /**
+   * Get audit log entries. Optionally limit to the most recent N entries.
+   */
+  getAuditLog(limit?: number): AuditEntry[] {
+    if (limit !== undefined && limit > 0) {
+      return this.auditLog.slice(-limit);
+    }
+    return [...this.auditLog];
+  }
+
+  /**
+   * Clear the audit log.
+   */
+  clearAuditLog(): void {
+    this.auditLog = [];
   }
 
   /**
@@ -236,7 +292,8 @@ export class IsomorphicSandbox {
   }
 
   /**
-   * Check if a capability grants a specific scope for a resource
+   * Check if a capability grants a specific scope for a resource.
+   * Records an audit entry when auditing is enabled.
    */
   check(
     token: string,
@@ -244,17 +301,19 @@ export class IsomorphicSandbox {
     resource: string
   ): { allowed: boolean; violation?: BoundaryViolation } {
     const cap = this.capabilities.get(token);
+    const truncatedToken = token.slice(0, 8) + '...';
 
     // Capability not found
     if (!cap) {
       const violation: BoundaryViolation = {
         type: 'capability_revoked',
         message: 'Capability not found',
-        capability: token.slice(0, 8) + '...',
+        capability: truncatedToken,
         resource,
         timestamp: Date.now(),
       };
       this.violations.push(violation);
+      this.recordAudit(truncatedToken, scope, resource, 'denied', 'Capability not found');
       return { allowed: false, violation };
     }
 
@@ -263,11 +322,12 @@ export class IsomorphicSandbox {
       const violation: BoundaryViolation = {
         type: 'capability_revoked',
         message: 'Capability has been revoked',
-        capability: token.slice(0, 8) + '...',
+        capability: truncatedToken,
         resource,
         timestamp: Date.now(),
       };
       this.violations.push(violation);
+      this.recordAudit(truncatedToken, scope, resource, 'denied', 'Capability has been revoked');
       return { allowed: false, violation };
     }
 
@@ -276,11 +336,12 @@ export class IsomorphicSandbox {
       const violation: BoundaryViolation = {
         type: 'capability_expired',
         message: 'Capability has expired',
-        capability: token.slice(0, 8) + '...',
+        capability: truncatedToken,
         resource,
         timestamp: Date.now(),
       };
       this.violations.push(violation);
+      this.recordAudit(truncatedToken, scope, resource, 'denied', 'Capability has expired');
       return { allowed: false, violation };
     }
 
@@ -289,11 +350,12 @@ export class IsomorphicSandbox {
       const violation: BoundaryViolation = {
         type: 'scope_denied',
         message: `Scope '${scope}' not granted by capability`,
-        capability: token.slice(0, 8) + '...',
+        capability: truncatedToken,
         resource,
         timestamp: Date.now(),
       };
       this.violations.push(violation);
+      this.recordAudit(truncatedToken, scope, resource, 'denied', `Scope '${scope}' not granted`);
       return { allowed: false, violation };
     }
 
@@ -305,11 +367,12 @@ export class IsomorphicSandbox {
           const violation: BoundaryViolation = {
             type: 'resource_denied',
             message: `Resource '${resource}' denied by pattern '${pattern.pattern}'`,
-            capability: token.slice(0, 8) + '...',
+            capability: truncatedToken,
             resource,
             timestamp: Date.now(),
           };
           this.violations.push(violation);
+          this.recordAudit(truncatedToken, scope, resource, 'denied', `Denied by pattern '${pattern.pattern}'`);
           return { allowed: false, violation };
         }
         allowed = true;
@@ -320,11 +383,12 @@ export class IsomorphicSandbox {
       const violation: BoundaryViolation = {
         type: 'resource_denied',
         message: `Resource '${resource}' not matched by any allow pattern`,
-        capability: token.slice(0, 8) + '...',
+        capability: truncatedToken,
         resource,
         timestamp: Date.now(),
       };
       this.violations.push(violation);
+      this.recordAudit(truncatedToken, scope, resource, 'denied', 'No matching allow pattern');
       return { allowed: false, violation };
     }
 
@@ -333,15 +397,44 @@ export class IsomorphicSandbox {
       const violation: BoundaryViolation = {
         type: 'capability_revoked',
         message: 'Parent capability is no longer valid',
-        capability: token.slice(0, 8) + '...',
+        capability: truncatedToken,
         resource,
         timestamp: Date.now(),
       };
       this.violations.push(violation);
+      this.recordAudit(truncatedToken, scope, resource, 'denied', 'Parent capability invalid');
       return { allowed: false, violation };
     }
 
+    this.recordAudit(truncatedToken, scope, resource, 'allowed');
     return { allowed: true };
+  }
+
+  /**
+   * Record an audit entry if auditing is enabled.
+   */
+  private recordAudit(
+    token: string,
+    scope: CapabilityScope,
+    resource: string,
+    result: 'allowed' | 'denied',
+    reason?: string
+  ): void {
+    if (!this.auditEnabled) return;
+
+    const entry: AuditEntry = {
+      timestamp: Date.now(),
+      token,
+      scope,
+      resource,
+      result,
+    };
+
+    if (reason !== undefined) {
+      entry.reason = reason;
+    }
+
+    this.auditLog.push(entry);
   }
 
   /**

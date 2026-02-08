@@ -4,7 +4,9 @@
  * Loads .env automatically — just run: npx tsx scripts/moltbook-post.ts
  */
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
+dotenv.config();
 import { Vault } from '../src/security/vault.js';
 
 const API_BASE = 'https://www.moltbook.com/api/v1';

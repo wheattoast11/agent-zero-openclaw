@@ -11,6 +11,7 @@ primary_region = "iad"
   NODE_ENV = "production"
   SMS_WEBHOOK_PORT = "8080"
   VAULT_DIR = "/data/.agent-zero"
+  MOLTBOOK_ACTIVE_POSTS = '["faf671ff-80e6-4f04-81d5-77fb8abddcac","102ec46e-2b0c-41be-9590-b2bad8da34fb","0f74d53e-0119-47fa-b0f7-527adf5c0aa8"]'
 
 [http_service]
   internal_port = 8080
