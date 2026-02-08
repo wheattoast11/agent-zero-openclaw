@@ -108,10 +108,17 @@ const DEFAULT_CONFIG: AttentionConfig = {
   baitPatterns: DEFAULT_BAIT_PATTERNS,
 };
 
+interface OutcomeRecord {
+  upvotes: number;
+  replies: number;
+  compositeScore: number;
+}
+
 export class AttentionField {
   private config: AttentionConfig;
   private engagements: number[] = []; // timestamps
   private stats = { scored: 0, engaged: 0, skipped: 0, baitDetected: 0 };
+  private outcomes: Map<string, OutcomeRecord> = new Map();
 
   constructor(config?: Partial<AttentionConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -135,13 +142,15 @@ export class AttentionField {
       };
     }
 
-    const priority = attention * alignment;
+    const outcomeBoost = this.getOutcomeBoost(thread.id);
+    const priority = attention * alignment + outcomeBoost;
     const reasons: string[] = [];
 
     if (alignment > 0.5) reasons.push(`high alignment (${(alignment * 100).toFixed(0)}%)`);
     if (attention > 0.5) reasons.push(`high attention (${thread.replyCount} replies)`);
     if (thread.crossReferences.length > 0) reasons.push(`${thread.crossReferences.length} cross-refs`);
     if (thread.authorType === 'agent') reasons.push('agent-authored');
+    if (outcomeBoost > 0) reasons.push(`outcome boost +${(outcomeBoost * 100).toFixed(0)}%`);
 
     return {
       threadId: thread.id,
@@ -179,6 +188,40 @@ export class AttentionField {
   recordEngagement(threadId: string): void {
     this.engagements.push(Date.now());
     this.stats.engaged++;
+  }
+
+  /**
+   * Record the measured outcome for a thread we engaged with.
+   */
+  recordOutcome(threadId: string, outcome: { upvotes: number; replies: number }): void {
+    const compositeScore = Math.min(1, (outcome.upvotes * 0.3 + outcome.replies * 0.7) / 10);
+    this.outcomes.set(threadId, {
+      upvotes: outcome.upvotes,
+      replies: outcome.replies,
+      compositeScore,
+    });
+  }
+
+  /**
+   * Get an additive boost for a thread based on historical outcomes
+   * of similar threads (by submolt/content alignment).
+   * Returns 0 for unknown threads with no historical signal.
+   */
+  getOutcomeBoost(threadId: string): number {
+    if (this.outcomes.size === 0) return 0;
+
+    // Compute average composite score across all recorded outcomes
+    let totalScore = 0;
+    let count = 0;
+    for (const outcome of this.outcomes.values()) {
+      totalScore += outcome.compositeScore;
+      count++;
+    }
+    if (count === 0) return 0;
+
+    const avgScore = totalScore / count;
+    // 30% weight for historical signal
+    return avgScore * 0.3;
   }
 
   detectBait(content: string): boolean {

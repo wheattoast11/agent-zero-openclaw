@@ -8,6 +8,8 @@
 import { sanitizeOutput } from '../security/outputSanitizer.js';
 import { InjectionFirewall, type FirewallVerdict } from '../security/injectionFirewall.js';
 import type { MoltbookPost, MoltbookComment } from '../channels/moltbook.js';
+import type { IdentityPromptBuilder } from '../runtime/identity.js';
+import type { StrategicContextStore } from './strategicContext.js';
 
 // ============================================================================
 // TYPES
@@ -31,6 +33,7 @@ export interface ThreadContext {
   comments: MoltbookComment[];
   submolt: string;
   coherenceLevel?: number;
+  strategicContext?: StrategicContextStore;
 }
 
 export interface ComposedResponse {
@@ -78,8 +81,9 @@ export class ResponseComposer {
   private config: ComposerConfig;
   private firewall: InjectionFirewall;
   private stats = { composed: 0, skipped: 0, failed: 0 };
+  private identityBuilder?: IdentityPromptBuilder;
 
-  constructor(config: Partial<ComposerConfig> & { apiKey: string }) {
+  constructor(config: Partial<ComposerConfig> & { apiKey: string }, identityBuilder?: IdentityPromptBuilder) {
     this.config = {
       model: 'anthropic/claude-sonnet-4-20250514',
       maxTokens: 300,
@@ -88,6 +92,7 @@ export class ResponseComposer {
       ...config,
     };
     this.firewall = new InjectionFirewall('standard');
+    this.identityBuilder = identityBuilder;
   }
 
   async compose(context: ThreadContext): Promise<ComposedResponse> {
@@ -96,10 +101,19 @@ export class ResponseComposer {
     // Build conversation context for the LLM
     const threadSummary = this.buildThreadSummary(context);
 
-    const systemPrompt = `${IDENTITY_PROMPT}
+    // Use identity builder if available, otherwise fall back to hardcoded prompt
+    const identityText = this.identityBuilder
+      ? this.identityBuilder.build({ currentState: 'operate' })
+      : IDENTITY_PROMPT;
+
+    const narrativeSection = context.strategicContext
+      ? this.buildNarrativeContext(context.strategicContext)
+      : '';
+
+    const systemPrompt = `${identityText}
 
 Current network coherence: ${context.coherenceLevel !== undefined ? `${(context.coherenceLevel * 100).toFixed(0)}%` : 'unknown'}
-
+${narrativeSection ? '\n' + narrativeSection + '\n' : ''}
 You are deciding whether and how to engage with a Moltbook thread.
 
 Respond with a JSON object (no markdown fencing):
@@ -115,7 +129,9 @@ Rules:
 - If the thread is good but you have nothing substantive to add, action=upvote
 - If you can add value, action=comment with a concise response (under 280 chars preferred)
 - confidence reflects how certain you are this is a good engagement
-- Never be sycophantic. Never pad responses. Substance only.`;
+- Never be sycophantic. Never pad responses. Substance only.
+- When narrative arcs are active, reference prior engagements for continuity
+- Escalate depth over time: first engagement is overview, subsequent engagements go deeper`;
 
     const userPrompt = `Thread to evaluate:\n\n${threadSummary}`;
 
@@ -155,7 +171,11 @@ Rules:
   }
 
   async composeOriginalPost(topic: string, submolt: string): Promise<ComposedResponse> {
-    const systemPrompt = `${IDENTITY_PROMPT}
+    const identityText = this.identityBuilder
+      ? this.identityBuilder.build({ currentState: 'operate' })
+      : IDENTITY_PROMPT;
+
+    const systemPrompt = `${identityText}
 
 You are composing an original Moltbook post for the "${submolt}" submolt.
 
@@ -204,19 +224,37 @@ Rules:
   // INTERNAL
   // ==========================================================================
 
+  private buildNarrativeContext(strategicContext: StrategicContextStore): string {
+    const arcs = strategicContext.getActiveArcs();
+    if (arcs.length === 0) return '';
+
+    const lines: string[] = ['NARRATIVE CONTEXT (reference these in your response when relevant):'];
+    for (const arc of arcs.slice(0, 5)) {
+      lines.push(`- Topic: ${arc.topic} (${arc.engagements.length} prior engagements, momentum: ${arc.momentum.toFixed(2)})`);
+    }
+
+    const summary = strategicContext.getSummary();
+    if (summary) {
+      lines.push('');
+      lines.push(summary);
+    }
+
+    return lines.join('\n');
+  }
+
   private buildThreadSummary(context: ThreadContext): string {
     const { post, comments } = context;
     const lines: string[] = [
       `Submolt: ${context.submolt}`,
       `Title: ${post.title}`,
       `Author: ${post.authorName} (${post.upvotes} upvotes, ${post.commentCount} comments)`,
-      `Content:\n${post.content.slice(0, 1000)}`,
+      `Content:\n${(post.content ?? '').slice(0, 1000)}`,
     ];
 
     if (comments.length > 0) {
       lines.push('\nRecent comments:');
       for (const c of comments.slice(-10)) {
-        lines.push(`  ${c.authorName}: ${c.content.slice(0, 200)}`);
+        lines.push(`  ${c.authorName ?? 'unknown'}: ${(c.content ?? '').slice(0, 200)}`);
       }
     }
 
@@ -288,6 +326,7 @@ Rules:
 
 export function createResponseComposer(
   config: Partial<ComposerConfig> & { apiKey: string },
+  identityBuilder?: IdentityPromptBuilder,
 ): ResponseComposer {
-  return new ResponseComposer(config);
+  return new ResponseComposer(config, identityBuilder);
 }

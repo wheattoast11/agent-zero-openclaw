@@ -1,13 +1,46 @@
 {
-  "name": "@terminals-tech/agent-zero-openclaw",
-  "version": "0.2.0",
-  "description": "Agent Zero skill for OpenClaw - Production-grade orchestration with thermodynamic routing, Kuramoto coherence, and isomorphic security",
+  "name": "@terminals-tech/agent-zero",
+  "version": "2.0.0",
+  "description": "Secure primitives for autonomous systems. Kuramoto coherence, thermodynamic routing, capability-based security, encrypted vault, session persistence, multi-model mesh, protocol interop. Built by systems intelligence.",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/primitives/index.js",
+  "types": "dist/primitives/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/primitives/index.js",
+      "types": "./dist/primitives/index.d.ts"
+    },
+    "./runtime": {
+      "import": "./dist/runtime/index.js",
+      "types": "./dist/runtime/index.d.ts"
+    },
+    "./security": {
+      "import": "./dist/security/index.js",
+      "types": "./dist/security/index.d.ts"
+    },
+    "./resonance": {
+      "import": "./dist/resonance/index.js",
+      "types": "./dist/resonance/index.d.ts"
+    },
+    "./routing": {
+      "import": "./dist/routing/index.js",
+      "types": "./dist/routing/index.d.ts"
+    },
+    "./interop": {
+      "import": "./dist/interop/index.js",
+      "types": "./dist/interop/index.d.ts"
+    }
+  },
   "bin": {
     "agent-zero": "./bin/agent-zero.js"
   },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "THEORY.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "build:skill": "tsc && cp SKILL.md skill.json dist/",
@@ -18,14 +51,21 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
-    "openclaw",
-    "moltbot",
-    "agent-zero",
-    "terminals-tech",
-    "thermodynamic-routing",
-    "kuramoto",
+    "agent",
     "multi-agent",
-    "ai-orchestration"
+    "kuramoto",
+    "thermodynamic-routing",
+    "capability-security",
+    "encrypted-vault",
+    "phase-synchronization",
+    "agent-coordination",
+    "terminals-tech",
+    "agent-zero",
+    "a2a",
+    "mcp",
+    "multi-model",
+    "session-persistence",
+    "context-engineering"
   ],
   "author": "terminals.tech",
   "license": "MIT",
@@ -33,6 +73,9 @@
     "@anthropic-ai/sdk": "^0.35.0",
     "@electric-sql/pglite": "^0.2.0",
     "@hapi/boom": "^10.0.1",
+    "@terminals-tech/core": "^0.1.1",
+    "@terminals-tech/embeddings": "^0.1.0",
+    "@terminals-tech/graph": "^0.1.0",
     "@whiskeysockets/baileys": "^6.7.0",
     "agent-twitter-client": "^0.0.18",
     "chalk": "^5.3.0",

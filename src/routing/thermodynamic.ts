@@ -11,6 +11,9 @@
 
 import type { Observer, Message, Fabric, FabricNode, GravityWell } from '../primitives/types.js';
 
+/** Minimum temperature to prevent degenerate Boltzmann distributions */
+export const MIN_TEMPERATURE = 0.01;
+
 export interface RouterConfig {
   /** Base temperature for Boltzmann sampling */
   temperature: number;
@@ -20,20 +23,27 @@ export interface RouterConfig {
   coherenceWeight: number;
   /** Weight for semantic distance */
   semanticWeight: number;
+  /** Weight for model affinity bonus (default 0) */
+  modelWeight?: number;
   /** Annealing schedule */
   annealingSchedule: 'none' | 'linear' | 'exponential' | 'adaptive';
 }
 
 export const DEFAULT_ROUTER_CONFIG: RouterConfig = {
   temperature: 1.0,
-  loadWeight: 0.3,
+  loadWeight: 0.2,
   coherenceWeight: 0.2,
-  semanticWeight: 0.5,
+  semanticWeight: 0.3,
+  modelWeight: 0.3,
   annealingSchedule: 'adaptive',
 };
 
 /**
- * Compute energy for routing a message to a specific agent
+ * Compute energy for routing a message to a specific agent.
+ * Lower energy = higher probability of selection.
+ *
+ * Model affinity is an optional bonus: when the model's identity embedding
+ * is semantically close to the message, energy decreases (better fit).
  */
 export function computeEnergy(
   messageEmbedding: number[],
@@ -41,7 +51,8 @@ export function computeEnergy(
   agentLoad: number,
   agentCoherence: number,
   agentAttractor: number[],
-  config: RouterConfig
+  config: RouterConfig,
+  modelEmbedding?: number[]
 ): number {
   // Semantic distance (cosine similarity inverted)
   const semanticDistance = 1 - cosineSimilarity(messageEmbedding, agentAttractor);
@@ -52,16 +63,23 @@ export function computeEnergy(
   // Coherence bonus (aligned agents cost less)
   const coherenceBonus = agentCoherence * config.coherenceWeight;
 
-  // Total energy
-  return (semanticDistance * config.semanticWeight) + loadPenalty - coherenceBonus;
+  // Model affinity bonus: how well does the model's identity match the task?
+  const modelAffinity = modelEmbedding
+    ? cosineSimilarity(messageEmbedding, modelEmbedding) * (config.modelWeight ?? 0)
+    : 0;
+
+  // Total energy (affinity is a bonus, so subtracted)
+  return (semanticDistance * config.semanticWeight) + loadPenalty - coherenceBonus - modelAffinity;
 }
 
 /**
  * Softmax with temperature for Boltzmann distribution
  */
 export function softmax(energies: number[], temperature: number): number[] {
+  // Floor temperature to prevent division by zero / degenerate distributions
+  const T = Math.max(MIN_TEMPERATURE, temperature);
   // Negate energies (lower energy = higher probability)
-  const negEnergies = energies.map(e => -e / temperature);
+  const negEnergies = energies.map(e => -e / T);
 
   // Numerical stability: subtract max
   const maxE = Math.max(...negEnergies);
@@ -149,7 +167,8 @@ export class ThermodynamicRouter {
   }
 
   /**
-   * Route a message to the optimal agent using thermodynamic sampling
+   * Route a message to the optimal agent using thermodynamic sampling.
+   * Agents may optionally carry a modelEmbedding for model-affinity routing.
    */
   route(
     message: Message,
@@ -158,6 +177,7 @@ export class ThermodynamicRouter {
       load: number;
       coherence: number;
       attractor: number[];
+      modelEmbedding?: number[];
     }>
   ): Observer {
     if (agents.length === 0) {
@@ -178,7 +198,8 @@ export class ThermodynamicRouter {
         agent.load,
         agent.coherence,
         agent.attractor,
-        this.config
+        this.config,
+        agent.modelEmbedding
       )
     );
 
@@ -204,6 +225,7 @@ export class ThermodynamicRouter {
       load: number;
       coherence: number;
       attractor: number[];
+      modelEmbedding?: number[];
     }>
   ): Map<string, { energy: number; probability: number }> {
     const messageEmbedding = message.embedding ?? new Array(768).fill(0);
@@ -215,7 +237,8 @@ export class ThermodynamicRouter {
         agent.load,
         agent.coherence,
         agent.attractor,
-        this.config
+        this.config,
+        agent.modelEmbedding
       )
     );
 
@@ -243,7 +266,7 @@ export class ThermodynamicRouter {
         this.temperature = Math.max(0.01, this.config.temperature - this.step * 0.001);
         break;
       case 'exponential':
-        this.temperature = this.config.temperature * Math.pow(0.999, this.step);
+        this.temperature = Math.max(MIN_TEMPERATURE, this.config.temperature * Math.pow(0.999, this.step));
         break;
       case 'adaptive':
         // Temperature adapts based on routing diversity
@@ -260,7 +283,7 @@ export class ThermodynamicRouter {
    * Set temperature directly (for adaptive control)
    */
   setTemperature(temp: number): void {
-    this.temperature = Math.max(0.01, temp);
+    this.temperature = Math.max(MIN_TEMPERATURE, temp);
   }
 
   /**

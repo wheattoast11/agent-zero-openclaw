@@ -26,6 +26,10 @@ export interface KuramotoConfig {
   coherenceThreshold: number;
   /** Time step for phase evolution (ms) */
   dt: number;
+  /** Max ticks without meaningful convergence progress before auto-intervention */
+  convergenceTimeoutTicks: number;
+  /** Minimum coherence improvement per window to count as "progressing" */
+  convergenceMinDelta: number;
 }
 
 export const DEFAULT_KURAMOTO_CONFIG: KuramotoConfig = {
@@ -34,6 +38,8 @@ export const DEFAULT_KURAMOTO_CONFIG: KuramotoConfig = {
   targetCoherence: 0.8,
   coherenceThreshold: 0.3,
   dt: 16, // 60fps
+  convergenceTimeoutTicks: 300, // ~5s at 60fps
+  convergenceMinDelta: 0.01,
 };
 
 export interface Oscillator {
@@ -123,6 +129,8 @@ export class KuramotoEngine {
   private oscillators: Map<string, Oscillator> = new Map();
   private coherenceHistory: number[] = [];
   private lastTick: number = 0;
+  private stalledTicks: number = 0;
+  private lastWindowCoherence: number = 0;
 
   constructor(config: Partial<KuramotoConfig> = {}) {
     this.config = { ...DEFAULT_KURAMOTO_CONFIG, ...config };
@@ -190,6 +198,25 @@ export class KuramotoEngine {
     // Keep last 1000 samples
     if (this.coherenceHistory.length > 1000) {
       this.coherenceHistory.shift();
+    }
+
+    // Convergence stall detection: if coherence isn't improving, auto-intervene
+    if (coherence < this.config.targetCoherence) {
+      const delta = coherence - this.lastWindowCoherence;
+      if (delta < this.config.convergenceMinDelta) {
+        this.stalledTicks++;
+      } else {
+        this.stalledTicks = 0;
+      }
+      this.lastWindowCoherence = coherence;
+
+      if (this.stalledTicks >= this.config.convergenceTimeoutTicks) {
+        this.forceSynchronize();
+        this.stalledTicks = 0;
+      }
+    } else {
+      this.stalledTicks = 0;
+      this.lastWindowCoherence = coherence;
     }
 
     return { coherence, phases: newPhases };
@@ -283,5 +310,7 @@ export class KuramotoEngine {
     this.oscillators.clear();
     this.coherenceHistory = [];
     this.lastTick = Date.now();
+    this.stalledTicks = 0;
+    this.lastWindowCoherence = 0;
   }
 }

@@ -12,11 +12,18 @@
  *   agent-zero migrate        # Request migration to terminals.tech
  */
 
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
+dotenv.config();
 import { quickStart, createResonanceRail } from '../dist/index.js';
 import { moltbookCli } from '../dist/cli/moltbook.js';
 import { setupWizard } from '../dist/cli/setup.js';
 import { startAgency } from '../dist/agency/runtime.js';
+import { createVault, Vault } from '../dist/security/vault.js';
 import chalk from 'chalk';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 const LOGO = `
 ${chalk.cyan('╔═══════════════════════════════════════════════════════════════════╗')}
@@ -30,8 +37,8 @@ ${chalk.cyan('║')}   ${chalk.bold.magenta('╚═╝  ╚═╝ ╚═══�
 ${chalk.cyan('║')}                                                                   ${chalk.cyan('║')}
 ${chalk.cyan('║')}   ${chalk.bold.white('Z E R O')}                                                       ${chalk.cyan('║')}
 ${chalk.cyan('║')}                                                                   ${chalk.cyan('║')}
-${chalk.cyan('║')}   ${chalk.gray('Multi-agent orchestration with thermodynamic routing')}          ${chalk.cyan('║')}
-${chalk.cyan('║')}   ${chalk.gray('& Kuramoto coherence for OpenClaw/Moltbot')}                     ${chalk.cyan('║')}
+${chalk.cyan('║')}   ${chalk.gray('Secure primitives for autonomous systems')}                     ${chalk.cyan('║')}
+${chalk.cyan('║')}   ${chalk.gray('Kuramoto coherence | Thermodynamic routing | AES-256 vault')}    ${chalk.cyan('║')}
 ${chalk.cyan('║')}                                                                   ${chalk.cyan('║')}
 ${chalk.cyan('║')}   ${chalk.blue('terminals.tech')}                                                 ${chalk.cyan('║')}
 ${chalk.cyan('║')}                                                                   ${chalk.cyan('║')}
@@ -65,6 +72,9 @@ async function main() {
       break;
     case 'agency':
       await agencyCommand(args.slice(1));
+      break;
+    case 'vault':
+      await vaultCommand(args.slice(1));
       break;
     case 'help':
     default:
@@ -165,7 +175,7 @@ async function startRail(args) {
 
 function showStatus() {
   console.log(chalk.cyan('\nAgent Zero Status\n'));
-  console.log(chalk.gray('  Version: ') + chalk.white('0.1.0'));
+  console.log(chalk.gray('  Version: ') + chalk.white('1.0.0'));
   console.log(chalk.gray('  Rail Endpoint: ') + chalk.blue('wss://space.terminals.tech/rail'));
   console.log(chalk.gray('  Documentation: ') + chalk.blue('https://terminals.tech/docs/agent-zero'));
   console.log();
@@ -185,6 +195,23 @@ async function requestMigration() {
   console.log();
 }
 
+function preflightCheck() {
+  const vaultPath = join(homedir(), '.agent-zero', 'vault.enc');
+  if (!existsSync(vaultPath)) {
+    console.log(chalk.red('\n  Vault not found at ~/.agent-zero/vault.enc'));
+    console.log(chalk.gray('  Run ') + chalk.cyan('agent-zero setup') + chalk.gray(' first to configure credentials.\n'));
+    console.log(chalk.gray('  The setup wizard will guide you through:'));
+    console.log(chalk.gray('    - Vault passphrase (encrypts all credentials)'));
+    console.log(chalk.gray('    - OpenRouter API key (LLM access)'));
+    console.log(chalk.gray('    - Moltbook API token'));
+    console.log(chalk.gray('    - WhatsApp configuration'));
+    console.log(chalk.gray('    - Summary schedule'));
+    console.log(chalk.gray('    - Resonance Rail endpoint\n'));
+    return false;
+  }
+  return true;
+}
+
 async function agencyCommand(args) {
   const sub = args[0];
 
@@ -193,6 +220,8 @@ async function agencyCommand(args) {
     console.log(chalk.gray('  Start with: agent-zero agency'));
     return;
   }
+
+  if (!preflightCheck()) return;
 
   // Prompt for vault passphrase
   const passphrase = process.env.VAULT_PASSPHRASE;
@@ -239,6 +268,7 @@ function showHelp() {
   console.log(chalk.gray('  agency') + '           Start 24/7 agency runtime');
   console.log(chalk.gray('  status') + '           Show current status');
   console.log(chalk.gray('  migrate') + '          Request migration to terminals.tech');
+  console.log(chalk.gray('  vault <cmd>') + '      Vault device management');
   console.log(chalk.gray('  moltbook <cmd>') + '   Moltbook engagement daemon');
   console.log(chalk.gray('  help') + '             Show this help message');
   console.log();
@@ -250,6 +280,53 @@ function showHelp() {
   console.log();
   console.log(chalk.gray('Learn more: ') + chalk.blue('https://terminals.tech'));
   console.log();
+}
+
+async function vaultCommand(args) {
+  const sub = args[0];
+  const passphrase = process.env.VAULT_PASSPHRASE;
+  if (!passphrase) {
+    console.error(chalk.red('  VAULT_PASSPHRASE env var required.'));
+    process.exit(1);
+  }
+
+  const vault = await createVault(passphrase);
+
+  switch (sub) {
+    case 'add-device': {
+      const label = args[1] ?? undefined;
+      const fp = await vault.addDevice(label);
+      console.log(chalk.green(`  Device registered: ${fp}...`));
+      console.log(chalk.gray(`  Label: ${label ?? '(none)'}`));
+      console.log(chalk.gray(`  Total devices: ${vault.listDevices().length}`));
+      break;
+    }
+    case 'devices': {
+      const devices = vault.listDevices();
+      console.log(chalk.cyan(`  ${devices.length} registered device(s):\n`));
+      for (const d of devices) {
+        console.log(chalk.white(`  [${d.index}] ${d.label ?? '(no label)'} — added ${d.addedAt}`));
+      }
+      break;
+    }
+    case 'info': {
+      console.log(chalk.cyan('  Vault Info\n'));
+      console.log(chalk.gray(`  Version: ${vault.getVersion()}`));
+      console.log(chalk.gray(`  Devices: ${vault.listDevices().length}`));
+      console.log(chalk.gray(`  Keys: ${(await vault.list()).length}`));
+      console.log(chalk.gray(`  Native fingerprint: ${Vault.getNativeFingerprint().slice(0, 16)}...`));
+      break;
+    }
+    default:
+      console.log(chalk.cyan('  Vault commands:\n'));
+      console.log(chalk.gray('  agent-zero vault add-device [label]') + '  Register this machine');
+      console.log(chalk.gray('  agent-zero vault devices') + '             List registered devices');
+      console.log(chalk.gray('  agent-zero vault info') + '                Vault info & fingerprint');
+      console.log();
+      console.log(chalk.gray('  Drift recovery:'));
+      console.log(chalk.gray('    VAULT_MACHINE_FINGERPRINT=<old> agent-zero vault add-device'));
+      break;
+  }
 }
 
 main().catch(console.error);
