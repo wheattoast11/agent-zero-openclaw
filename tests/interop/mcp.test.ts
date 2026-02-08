@@ -66,9 +66,9 @@ describe('McpStreamableAdapter', () => {
   // --------------------------------------------------------------------------
 
   describe('handleInitialize', () => {
-    it('creates session', () => {
+    it('creates session', async () => {
       const req = makeRequest('initialize');
-      const result = adapter.handleRequest(req);
+      const result = await adapter.handleRequest(req);
 
       expect(result.sessionId).toBeDefined();
       expect(result.sessionId.startsWith('mcp_')).toBe(true);
@@ -281,17 +281,17 @@ describe('McpStreamableAdapter', () => {
   // --------------------------------------------------------------------------
 
   describe('handleRequest', () => {
-    it('returns json type for non-streaming', () => {
+    it('returns json type for non-streaming', async () => {
       const req = makeRequest('initialize');
-      const result = adapter.handleRequest(req);
+      const result = await adapter.handleRequest(req);
 
       expect(result.type).toBe('json');
       expect(result.response).toBeDefined();
     });
 
-    it('returns error for unknown method', () => {
+    it('returns error for unknown method', async () => {
       const req = makeRequest('unknown/method');
-      const result = adapter.handleRequest(req);
+      const result = await adapter.handleRequest(req);
 
       expect(result.type).toBe('json');
       expect(result.response).toBeDefined();
@@ -299,12 +299,12 @@ describe('McpStreamableAdapter', () => {
       expect(result.response!.error!.code).toBe(-32601);
     });
 
-    it('preserves session across multiple requests', () => {
+    it('preserves session across multiple requests', async () => {
       const req1 = makeRequest('initialize');
-      const result1 = adapter.handleRequest(req1);
+      const result1 = await adapter.handleRequest(req1);
 
       const req2 = makeRequest('tools/list');
-      const result2 = adapter.handleRequest(req2, result1.sessionId);
+      const result2 = await adapter.handleRequest(req2, result1.sessionId);
 
       expect(result2.sessionId).toBe(result1.sessionId);
     });

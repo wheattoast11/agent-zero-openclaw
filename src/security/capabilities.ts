@@ -328,6 +328,12 @@ export class SkillCapabilityManager {
    *   & = combine (both granted, higher precedence)
    *   | = union (either granted, lower precedence)
    *
+   * NOTE: In the current capability model, both & and | resolve to `combine()`
+   * because capabilities are additive scope sets — "grant A and B" and "grant
+   * A or B" both result in the union of scopes. A future `intersect()` combinator
+   * would make & restrict to the overlap, but this is not yet implemented.
+   * The two operators are preserved for DSL readability and forward compatibility.
+   *
    * Functions:
    *   read(pattern), write(pattern), network(domain),
    *   execute(binary), spawn(N), memory(bytes)

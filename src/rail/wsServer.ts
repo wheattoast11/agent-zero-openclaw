@@ -20,6 +20,7 @@ import { verifyUserToken } from './jwtVerifier.js';
 import { UserSessionManager } from './userSessionManager.js';
 import { AbsorptionProtocol } from '../coherence/absorption.js';
 import { RailAuthProtocol } from './authProtocol.js';
+import { timingSafeEqual as cryptoTimingSafeEqual } from 'crypto';
 import { railLog } from './logger.js';
 
 // ============================================================================
@@ -478,10 +479,22 @@ export class RailWebSocketServer {
   // HTTP REQUEST BODY HELPER
   // ==========================================================================
 
+  /** Maximum HTTP request body size (1 MB) */
+  private static readonly MAX_BODY_SIZE = 1_048_576;
+
   private readBody(req: IncomingMessage): Promise<string> {
     return new Promise((resolve, reject) => {
       let body = '';
-      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      let size = 0;
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > RailWebSocketServer.MAX_BODY_SIZE) {
+          req.destroy();
+          reject(new Error('Request body too large'));
+          return;
+        }
+        body += chunk.toString();
+      });
       req.on('end', () => resolve(body));
       req.on('error', reject);
     });
@@ -566,8 +579,28 @@ export class RailWebSocketServer {
       return;
     }
 
+    // ---- Admin auth helper for mutating/compute endpoints ----
+    const requireAdmin = (): boolean => {
+      const adminSecret = process.env['RAIL_ADMIN_SECRET'];
+      if (!adminSecret) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Admin auth not configured' }));
+        return false;
+      }
+      const authHeader = req.headers['authorization'] ?? '';
+      const expected = `Bearer ${adminSecret}`;
+      if (authHeader.length !== expected.length ||
+          !cryptoTimingSafeEqual(Buffer.from(authHeader), Buffer.from(expected))) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return false;
+      }
+      return true;
+    };
+
     // ---- POST /pause (A1) ----
     if (req.method === 'POST' && url === '/pause') {
+      if (!requireAdmin()) return;
       const snapshot = this.rail.pause();
       // Persist pause state if persistence available
       if (this.persistence) {
@@ -591,6 +624,7 @@ export class RailWebSocketServer {
 
     // ---- POST /resume (A1) ----
     if (req.method === 'POST' && url === '/resume') {
+      if (!requireAdmin()) return;
       this.rail.resume();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -663,6 +697,7 @@ export class RailWebSocketServer {
 
     // ---- POST /synthesize (A3) ----
     if (req.method === 'POST' && url === '/synthesize') {
+      if (!requireAdmin()) return;
       this.readBody(req).then(body => {
         let parsed: { query?: string; embedding?: number[]; agentIds?: string[]; limit?: number };
         try {
@@ -697,8 +732,10 @@ export class RailWebSocketServer {
         return;
       }
 
-      const authHeader = req.headers['authorization'];
-      if (authHeader !== `Bearer ${adminSecret}`) {
+      const authHeader = req.headers['authorization'] ?? '';
+      const expected = `Bearer ${adminSecret}`;
+      if (authHeader.length !== expected.length ||
+          !cryptoTimingSafeEqual(Buffer.from(authHeader), Buffer.from(expected))) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized' }));
         return;

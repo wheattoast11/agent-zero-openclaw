@@ -7,8 +7,49 @@
  */
 
 import { PGlite } from '@electric-sql/pglite';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { cosineSimilarity } from '../routing/thermodynamic.js';
 import type { RailClient } from './server.js';
+
+// ============================================================================
+// ENROLLMENT ENCRYPTION (AES-256-GCM, key derived from RAIL_ADMIN_SECRET)
+// ============================================================================
+
+const ENC_PREFIX = 'enc:';
+
+function getEnrollmentKey(): Buffer | null {
+  const adminSecret = process.env['RAIL_ADMIN_SECRET'];
+  if (!adminSecret) return null;
+  return createHash('sha256').update(adminSecret).digest();
+}
+
+function encryptSecret(plaintext: string): string {
+  const key = getEnrollmentKey();
+  if (!key) return plaintext; // fallback to plaintext if no admin secret
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // Format: enc:<iv hex>:<tag hex>:<ciphertext hex>
+  return `${ENC_PREFIX}${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+function decryptSecret(stored: string): string {
+  if (!stored.startsWith(ENC_PREFIX)) return stored; // legacy plaintext
+  const key = getEnrollmentKey();
+  if (!key) return stored; // can't decrypt without admin secret
+  const parts = stored.slice(ENC_PREFIX.length).split(':');
+  if (parts.length !== 3) return stored;
+  const [ivHex, tagHex, ciphertextHex] = parts;
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+    const decrypted = Buffer.concat([decipher.update(Buffer.from(ciphertextHex, 'hex')), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch {
+    return stored; // decryption failed — wrong key or corrupt data
+  }
+}
 
 // ============================================================================
 // TYPES
@@ -206,16 +247,21 @@ export class PGliteRailPersistence implements RailPersistence {
   }
 
   async saveEnrollment(agentId: string, secretHash: string): Promise<void> {
+    const encrypted = encryptSecret(secretHash);
     await this.db.query(
       `INSERT INTO rail_enrollments (agent_id, secret_hash) VALUES ($1, $2)
        ON CONFLICT (agent_id) DO UPDATE SET secret_hash = $2`,
-      [agentId, secretHash]
+      [agentId, encrypted]
     );
   }
 
   async loadEnrollments(): Promise<Array<{ agent_id: string; secret_hash: string }>> {
     const result = await this.db.query('SELECT agent_id, secret_hash FROM rail_enrollments');
-    return result.rows as Array<{ agent_id: string; secret_hash: string }>;
+    const rows = result.rows as Array<{ agent_id: string; secret_hash: string }>;
+    return rows.map(row => ({
+      agent_id: row.agent_id,
+      secret_hash: decryptSecret(row.secret_hash),
+    }));
   }
 
   startCoherenceLogging(getCoherence: () => number, getAgentCount: () => number, getMeanPhase: () => number): void {
@@ -296,11 +342,16 @@ export class PGliteRailPersistence implements RailPersistence {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // If embedding search is requested, load all matching rows and compute cosine similarity in JS
+    // If embedding search is requested, load matching rows (capped) and compute cosine similarity in JS
     if (query.embedding && query.embedding.length > 0) {
+      // Cap the candidate set to avoid loading the entire table
+      const candidateLimit = Math.max(limit * 10, 1000);
+      params.push(candidateLimit);
       const sql = `SELECT id, agent_id, agent_name, content, kind, embedding, metadata, created_at
                    FROM rail_traces ${whereClause}
-                   ORDER BY created_at DESC`;
+                   ORDER BY created_at DESC
+                   LIMIT $${paramIdx}`;
+      paramIdx++;
       const result = await this.db.query(sql, params);
       const rows = result.rows as Array<{
         id: number;

@@ -194,12 +194,12 @@ export class McpStreamableAdapter {
    * Handle an incoming MCP request.
    * Routes to the appropriate handler based on method.
    */
-  handleRequest(request: McpRequest, sessionId?: string): {
+  async handleRequest(request: McpRequest, sessionId?: string): Promise<{
     type: 'json' | 'sse';
     sessionId: string;
     response?: McpResponse;
     stream?: AsyncGenerator<McpResponse>;
-  } {
+  }> {
     const session = this.getOrCreateSession(sessionId);
 
     switch (request.method) {
@@ -218,13 +218,10 @@ export class McpStreamableAdapter {
         };
 
       case 'tools/call':
-        // Tool calls are async but we resolve them synchronously here
-        // since handleRequest returns a structure. The caller should
-        // await handleToolCall for actual execution.
         return {
           type: 'json',
           sessionId: session.id,
-          // Response will be populated by the caller using handleToolCall
+          response: await this.handleToolCall(request),
         };
 
       default:
